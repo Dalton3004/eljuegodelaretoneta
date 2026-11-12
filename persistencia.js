@@ -1,16 +1,65 @@
 /**
- * Cuentas, sesiones, ranking y partidos en disco (data/liga.json).
+ * Cuentas, sesiones, ranking y partidos en disco (liga.json).
  * No guarda contraseñas en texto plano.
  * El proceso de Node es la única escritura: cada operación lee, cambia y guarda
  * antes de devolver, así dos pedidos seguidos no se pisan.
+ *
+ * LAS CUENTAS NO SE PIERDEN AL SUBIR UNA VERSIÓN NUEVA:
+ *  - El archivo ya NO vive dentro de la carpeta del proyecto (que se reemplaza en cada
+ *    versión). Se busca, en este orden, un lugar que sobreviva a los cambios de versión:
+ *      1. LIGA_DATA        (ruta completa del archivo)
+ *      2. LIGA_DATA_DIR / DATA_DIR / RAILWAY_VOLUME_MOUNT_PATH   (carpeta; p. ej. un Volume)
+ *      3. /data o /var/data si existen y se puede escribir (Fly.io / Render con disco)
+ *      4. ~/.liga-chaquito-f8/   (tu PC: lo comparten todas las versiones del juego)
+ *      5. data/ dentro del proyecto (último recurso, es el comportamiento viejo)
+ *  - Si hay un data/liga.json viejo dentro del proyecto, se migra solo (se copia o se fusiona).
+ *  - Un archivo roto NUNCA se reemplaza por uno vacío: se aparta y se recupera de la copia (.bak).
+ *  - Cada guardado deja una copia (.bak) y una copia por día (últimos 7 días).
+ *  - Respaldo / restauración manual: ver exportarRespaldo() y restaurarRespaldo().
  */
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import {
+    accessSync, constants, copyFileSync, existsSync, mkdirSync, readdirSync,
+    readFileSync, renameSync, statSync, unlinkSync, writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DATA_PATH = process.env.LIGA_DATA
-    || join(dirname(fileURLToPath(import.meta.url)), "data", "liga.json");
+const RAIZ = dirname(fileURLToPath(import.meta.url));
+const RUTA_VIEJA = join(RAIZ, "data", "liga.json");
+
+function escribible(dir) {
+    try {
+        mkdirSync(dir, { recursive: true });
+        accessSync(dir, constants.W_OK);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function resolverAlmacenamiento() {
+    const env = process.env;
+    if (env.LIGA_DATA) return { ruta: env.LIGA_DATA, origen: "LIGA_DATA", volumen: true };
+    for (const [nombre, dir] of [
+        ["LIGA_DATA_DIR", env.LIGA_DATA_DIR],
+        ["DATA_DIR", env.DATA_DIR],
+        ["RAILWAY_VOLUME_MOUNT_PATH", env.RAILWAY_VOLUME_MOUNT_PATH],
+    ]) {
+        if (dir && escribible(dir)) return { ruta: join(dir, "liga.json"), origen: nombre, volumen: true };
+    }
+    for (const dir of ["/data", "/var/data"]) {
+        if (existsSync(dir) && escribible(dir)) return { ruta: join(dir, "liga.json"), origen: "disco " + dir, volumen: true };
+    }
+    const casa = join(homedir(), ".liga-chaquito-f8");
+    if (escribible(casa)) return { ruta: join(casa, "liga.json"), origen: "carpeta del usuario", volumen: false };
+    return { ruta: RUTA_VIEJA, origen: "carpeta del proyecto", volumen: false };
+}
+
+const ALMACEN = resolverAlmacenamiento();
+const DATA_PATH = ALMACEN.ruta;
+const BAK_PATH = DATA_PATH + ".bak";
 
 const SESION_MS = 30 * 24 * 60 * 60 * 1000;
 const COOLDOWN_MS = 8000;
@@ -19,18 +68,60 @@ function vacio() {
     return { v: 1, cuentas: [], sesiones: [], jugadores: [], partidos: [] };
 }
 
-function leer() {
+/** Lee y valida un archivo de datos. Devuelve null si no existe o no es un liga.json válido. */
+function parsear(ruta) {
     try {
-        const data = JSON.parse(readFileSync(DATA_PATH, "utf8"));
-        if (!data || data.v !== 1) return vacio();
+        const data = JSON.parse(readFileSync(ruta, "utf8"));
+        if (!data || data.v !== 1) return null;
         data.cuentas = Array.isArray(data.cuentas) ? data.cuentas : [];
         data.sesiones = Array.isArray(data.sesiones) ? data.sesiones : [];
         data.jugadores = Array.isArray(data.jugadores) ? data.jugadores : [];
         data.partidos = Array.isArray(data.partidos) ? data.partidos : [];
         return data;
     } catch {
-        return vacio();
+        return null;
     }
+}
+
+function copiasDiarias() {
+    try {
+        const nombre = basename(DATA_PATH).replace(/\.json$/, "");
+        return readdirSync(dirname(DATA_PATH))
+            .filter((f) => f.startsWith(nombre + ".") && /\.\d{4}-\d{2}-\d{2}\.json$/.test(f))
+            .sort()
+            .reverse()
+            .map((f) => join(dirname(DATA_PATH), f));
+    } catch {
+        return [];
+    }
+}
+
+function leer() {
+    if (existsSync(DATA_PATH)) {
+        const data = parsear(DATA_PATH);
+        if (data) return data;
+        // El archivo existe pero está roto: se aparta (no se borra) para que nunca se pise con uno vacío.
+        const apartado = DATA_PATH + ".roto-" + Date.now();
+        try {
+            renameSync(DATA_PATH, apartado);
+            console.error("[persistencia] liga.json ilegible, apartado en " + apartado);
+        } catch (e) {
+            console.error("[persistencia] liga.json ilegible y no se pudo apartar:", e.message);
+        }
+    }
+    // Falta o estaba roto: se intenta recuperar de la última copia buena.
+    for (const copia of [BAK_PATH, ...copiasDiarias()]) {
+        const data = parsear(copia);
+        if (data) {
+            try {
+                mkdirSync(dirname(DATA_PATH), { recursive: true });
+                copyFileSync(copia, DATA_PATH);
+            } catch { /* se sigue con lo leído */ }
+            console.warn("[persistencia] datos recuperados desde " + copia + " (" + data.cuentas.length + " cuentas)");
+            return data;
+        }
+    }
+    return vacio();
 }
 
 function guardar(data) {
@@ -39,7 +130,111 @@ function guardar(data) {
     mkdirSync(dirname(DATA_PATH), { recursive: true });
     const tmp = DATA_PATH + ".tmp";
     writeFileSync(tmp, JSON.stringify(data));
+    // Copia de lo anterior (si tenía algo) antes de reemplazarlo.
+    try {
+        if (existsSync(DATA_PATH) && statSync(DATA_PATH).size > 80) copyFileSync(DATA_PATH, BAK_PATH);
+    } catch { /* la copia es un extra: no frena el guardado */ }
     renameSync(tmp, DATA_PATH);
+    copiaDelDia(data);
+}
+
+/** Una copia por día (conserva las últimas 7). Solo si hay cuentas, para no copiar archivos vacíos. */
+function copiaDelDia(data) {
+    if (!data.cuentas.length) return;
+    try {
+        const hoy = new Date().toISOString().slice(0, 10);
+        const destino = DATA_PATH.replace(/\.json$/, "") + "." + hoy + ".json";
+        if (!existsSync(destino)) copyFileSync(DATA_PATH, destino);
+        for (const vieja of copiasDiarias().slice(7)) unlinkSync(vieja);
+    } catch { /* extra: no frena el guardado */ }
+}
+
+/** Suma a 'destino' las cuentas de 'origen' que todavía no existen (por id o por nombre). Nunca pisa ni borra. */
+function fusionar(destino, origen) {
+    const ids = new Set(destino.cuentas.map((c) => c.id));
+    const nombres = new Set(destino.cuentas.map((c) => String(c.nombre).toLowerCase()));
+    let agregadas = 0;
+    for (const c of origen.cuentas) {
+        if (!c || typeof c.id !== "string" || typeof c.nombre !== "string" || typeof c.hash !== "string" || typeof c.salt !== "string") continue;
+        if (ids.has(c.id) || nombres.has(c.nombre.toLowerCase())) continue;
+        destino.cuentas.push(c);
+        ids.add(c.id);
+        nombres.add(c.nombre.toLowerCase());
+        agregadas++;
+        const j = origen.jugadores.find((x) => x && x.cuentaId === c.id);
+        if (j && !destino.jugadores.some((x) => x.cuentaId === c.id)) destino.jugadores.push(j);
+        for (const p of origen.partidos) if (p && p.cuentaId === c.id) destino.partidos.push(p);
+        for (const se of origen.sesiones) {
+            if (se && se.cuentaId === c.id && !destino.sesiones.some((x) => x.token === se.token)) destino.sesiones.push(se);
+        }
+    }
+    destino.partidos.sort((a, b) => (a.cuando || 0) - (b.cuando || 0));
+    return agregadas;
+}
+
+/** Migra el data/liga.json viejo (dentro de la carpeta del proyecto) al lugar permanente. */
+function migrarDatosViejos() {
+    if (DATA_PATH === RUTA_VIEJA || !existsSync(RUTA_VIEJA)) return;
+    const viejo = parsear(RUTA_VIEJA);
+    if (!viejo) return;
+    try {
+        if (!existsSync(DATA_PATH)) {
+            mkdirSync(dirname(DATA_PATH), { recursive: true });
+            copyFileSync(RUTA_VIEJA, DATA_PATH);
+            console.log("[persistencia] cuentas migradas desde " + RUTA_VIEJA + " (" + viejo.cuentas.length + ")");
+        } else {
+            const actual = leer();
+            const n = fusionar(actual, viejo);
+            if (n) {
+                guardar(actual);
+                console.log("[persistencia] " + n + " cuenta(s) del data/liga.json viejo sumadas a las actuales");
+            }
+        }
+        renameSync(RUTA_VIEJA, RUTA_VIEJA + ".migrado");   // ya está a salvo: no se vuelve a procesar
+    } catch (e) {
+        console.error("[persistencia] no se pudo migrar el data/liga.json viejo:", e.message);
+    }
+}
+
+migrarDatosViejos();
+
+/** Dónde se guardan las cuentas (para mostrar en el log del servidor). */
+export function infoAlmacenamiento() {
+    const hospedaje = process.env.RAILWAY_ENVIRONMENT ? "Railway" : process.env.RENDER ? "Render"
+        : process.env.FLY_APP_NAME ? "Fly.io" : process.env.GLITCH_DOMAIN ? "Glitch" : "";
+    return {
+        ruta: DATA_PATH,
+        origen: ALMACEN.origen,
+        // En un hosting sin disco persistente (Volume) las cuentas se borran en cada deploy.
+        riesgo: !!hospedaje && !ALMACEN.volumen,
+        hospedaje,
+    };
+}
+
+/** Todo el contenido (cuentas con sus claves ya hasheadas). Sirve para bajar un respaldo. */
+export function exportarRespaldo() {
+    return leer();
+}
+
+/** Suma las cuentas de un respaldo a las actuales. Nunca borra ni pisa cuentas que ya existen. */
+export function restaurarRespaldo(contenido) {
+    let obj = contenido;
+    if (typeof obj === "string") {
+        try { obj = JSON.parse(obj); } catch { obj = null; }
+    }
+    if (!obj || obj.v !== 1 || !Array.isArray(obj.cuentas)) {
+        return { status: 400, body: { ok: false, error: "No es un respaldo válido de liga.json." } };
+    }
+    const origen = {
+        cuentas: obj.cuentas,
+        sesiones: Array.isArray(obj.sesiones) ? obj.sesiones : [],
+        jugadores: Array.isArray(obj.jugadores) ? obj.jugadores : [],
+        partidos: Array.isArray(obj.partidos) ? obj.partidos : [],
+    };
+    const data = leer();
+    const agregadas = fusionar(data, origen);
+    if (agregadas) guardar(data);
+    return { status: 200, body: { ok: true, cuentasAgregadas: agregadas, cuentasTotal: data.cuentas.length } };
 }
 
 function normalizarNombre(n) {
@@ -232,6 +427,7 @@ export function resumen() {
         cuentas: data.cuentas.length,
         jugadores: data.jugadores.length,
         partidos: data.partidos.length,
+        almacenamiento: { origen: ALMACEN.origen, permanente: ALMACEN.volumen || ALMACEN.origen === "carpeta del usuario" },
     };
 }
 

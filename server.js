@@ -22,12 +22,12 @@
 
 import express from "express";
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { Server } from "socket.io";
 import { Partido, TICK_HZ } from "./partido_online.js";
-import { anotarOnline, anotarPartido, cuentaDe, entrar, historial, listarRanking, registrar, resumen, salir } from "./persistencia.js";
+import { anotarOnline, anotarPartido, cuentaDe, entrar, exportarRespaldo, historial, infoAlmacenamiento, listarRanking, registrar, restaurarRespaldo, resumen, salir } from "./persistencia.js";
 
 const PORT = Number(process.env.PORT) || 3001;
 const TICK_MS = 1000 / TICK_HZ;
@@ -54,6 +54,36 @@ app.use((req, res, next) => {
     if (req.method === "OPTIONS") return res.sendStatus(204);
     next();
 });
+
+// ---------------------------------------------------------------------------
+// Respaldo de cuentas (solo si definís la variable de entorno ADMIN_TOKEN).
+//   Bajar:     GET  /api/admin/respaldo?clave=TU_ADMIN_TOKEN        (o header Authorization: Bearer ...)
+//   Restaurar: POST /api/admin/restaurar   con el liga.json en el cuerpo
+// Va antes del parser general porque un respaldo pesa más de 32 kb.
+// ---------------------------------------------------------------------------
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+function esAdmin(req) {
+    if (!ADMIN_TOKEN) return false;
+    const h = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
+    const dado = h ? h[1] : String(req.query.clave || "");
+    const a = createHash("sha256").update(dado).digest();
+    const b = createHash("sha256").update(ADMIN_TOKEN).digest();
+    return timingSafeEqual(a, b);
+}
+app.get("/api/admin/respaldo", (req, res) => {
+    if (!ADMIN_TOKEN) return res.sendStatus(404);
+    if (!esAdmin(req)) return res.status(401).json({ ok: false, error: "Clave incorrecta." });
+    res.setHeader("Content-Disposition", 'attachment; filename="liga-respaldo.json"');
+    res.setHeader("Cache-Control", "no-store");
+    res.type("json").send(JSON.stringify(exportarRespaldo()));
+});
+app.post("/api/admin/restaurar", express.json({ limit: "25mb" }), (req, res) => {
+    if (!ADMIN_TOKEN) return res.sendStatus(404);
+    if (!esAdmin(req)) return res.status(401).json({ ok: false, error: "Clave incorrecta." });
+    const out = restaurarRespaldo(req.body);
+    res.status(out.status).json(out.body);
+});
+
 app.use(express.json({ limit: "32kb" }));
 app.use("/data", (_req, res) => res.sendStatus(404));
 // Health check para el host (Render, Railway, etc.)
@@ -188,7 +218,15 @@ function crearSala(sockLocal, sockVisitante) {
     sockLocal.join(salaId);
     sockVisitante.join(salaId);
 
-    const base = { salaId, localId: sockLocal.id, visitanteId: sockVisitante.id };
+    const base = {
+        salaId,
+        localId: sockLocal.id,
+        visitanteId: sockVisitante.id,
+        equipos: {
+            local: partido.equipoLocalId || "",
+            visitante: partido.equipoVisitanteId || "",
+        },
+    };
     sockLocal.emit("partido_listo", { ...base, rol: "Local" });
     sockVisitante.emit("partido_listo", { ...base, rol: "Visitante" });
     io.to(salaId).emit("estado_juego", partido.snapshot());
@@ -281,6 +319,14 @@ const esEntradaDirecta = process.argv[1] && import.meta.url === pathToFileURL(pr
 if (esEntradaDirecta) {
     httpServer.listen(PORT, "0.0.0.0", () => {
         console.log(`[liga-chaquito] matchmaking + fisicas en :${PORT}`);
+        const alm = infoAlmacenamiento();
+        const r = resumen();
+        console.log(`[liga-chaquito] cuentas: ${r.cuentas} · guardadas en ${alm.ruta} (${alm.origen})`);
+        if (alm.riesgo) {
+            console.warn(`[liga-chaquito] ATENCIÓN: ${alm.hospedaje} sin disco persistente. Las cuentas se BORRAN en cada deploy. `
+                + "Agregá un Volume/disco y definí LIGA_DATA_DIR (ver DEPLOY.md).");
+        }
+        if (!process.env.ADMIN_TOKEN) console.log("[liga-chaquito] tip: definí ADMIN_TOKEN para poder bajar/restaurar un respaldo de las cuentas.");
     });
 }
 

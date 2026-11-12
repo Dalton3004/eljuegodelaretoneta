@@ -1,6 +1,6 @@
 // Generado por tools/configurar_animaciones.py. No editar a mano.
 window.ANIMACIONES = {
- "version": 1,
+ "version": 2,
  "global": {
   "preset": "dinamico",
   "intensidad": 1.0,
@@ -8,6 +8,61 @@ window.ANIMACIONES = {
   "particulas": 1.0,
   "estela": true,
   "festejos": true
+ },
+ "acciones": {
+  "patada": {
+   "duracion": 0.34,
+   "windup_frac": 0.22,
+   "impacto_frac": 0.56,
+   "cuadro_windup": "S_windup",
+   "cuadro_impacto": "S_kick"
+  },
+  "barrida": {
+   "fases": [
+    {
+     "cuadro": "SL_1",
+     "hasta": 0.2
+    },
+    {
+     "cuadro": "SL_2",
+     "hasta": 0.68
+    },
+    {
+     "cuadro": "SL_3",
+     "hasta": 1.0
+    }
+   ],
+   "levantarse_duracion": 0.42,
+   "levantarse_fases": [
+    {
+     "cuadro": "SL_end",
+     "hasta": 0.42
+    },
+    {
+     "cuadro": "SL_1",
+     "hasta": 0.78
+    }
+   ]
+  },
+  "arquero": {
+   "aterrizaje_duracion": 0.3,
+   "aterrizaje_fases": [
+    {
+     "cuadro": "GK_dive_low_3",
+     "hasta": 0.55
+    },
+    {
+     "cuadro": "GK_ready",
+     "hasta": 1.0
+    }
+   ],
+   "alerta_distancia": 210
+  },
+  "transiciones": {
+   "arranque_duracion": 0.18,
+   "freno_duracion": 0.22,
+   "giro_duracion": 0.2
+  }
  },
  "jugadores": {
   "local_0": {
@@ -290,6 +345,106 @@ window.ANIMACIONES = {
    0.1228,
    0.0728,
    0.0297,
+   0.0
+  ],
+  "patada": [
+   -0.0,
+   -0.1405,
+   -0.2716,
+   -0.3848,
+   -0.4724,
+   -0.5287,
+   -0.5499,
+   -0.5346,
+   -0.4839,
+   -0.4011,
+   -0.2917,
+   0.9253,
+   0.7933,
+   0.6482,
+   0.4994,
+   0.3546,
+   0.22,
+   0.1001,
+   -0.0021,
+   -0.0851,
+   -0.1485,
+   -0.1929,
+   -0.2198,
+   -0.2312,
+   -0.2294,
+   -0.2171,
+   -0.1966,
+   -0.1707,
+   -0.1414,
+   -0.1109,
+   -0.0808,
+   -0.0525,
+   -0.027,
+   -0.005,
+   0.0132,
+   0.0273,
+   0.0375,
+   0.0439,
+   0.0471,
+   0.0474,
+   0.0454,
+   0.0417,
+   0.0366,
+   0.0307,
+   0.0245,
+   0.0183,
+   0.0123,
+   0.0069
+  ],
+  "zancada": [
+   0.0,
+   0.1425,
+   0.2343,
+   0.3129,
+   0.3835,
+   0.4482,
+   0.508,
+   0.5637,
+   0.6155,
+   0.6637,
+   0.7086,
+   0.7501,
+   0.7884,
+   0.8235,
+   0.8555,
+   0.8842,
+   0.9098,
+   0.9322,
+   0.9514,
+   0.9675,
+   0.9803,
+   0.99,
+   0.9964,
+   0.9996,
+   0.9996,
+   0.9964,
+   0.99,
+   0.9803,
+   0.9675,
+   0.9514,
+   0.9322,
+   0.9098,
+   0.8842,
+   0.8555,
+   0.8235,
+   0.7884,
+   0.7501,
+   0.7086,
+   0.6637,
+   0.6155,
+   0.5637,
+   0.508,
+   0.4482,
+   0.3835,
+   0.3129,
+   0.2343,
+   0.1425,
    0.0
   ]
  }

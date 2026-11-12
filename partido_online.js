@@ -32,9 +32,15 @@ class Entrada {
         this.e = false;
         this.r = false;
         this.q = false;
+        // Botones táctiles separados: TIRO solo tira, BARRER solo barre (ESPACIO del teclado hace ambas cosas).
+        this.tiro = false;
+        this.barrer = false;
         // Órdenes de un solo disparo (se consumen en el siguiente tick).
         this.espacioDown = false;
         this.espacioUp = false;
+        this.tiroDown = false;
+        this.tiroUp = false;
+        this.barrerDown = false;
         this.pase = false;
         this.pases = 0;
         this.largo = false;
@@ -46,6 +52,13 @@ class Entrada {
         const e = !!(data.e || data.pase);
         const r = !!(data.r || data.largo);
         const q = !!(data.q || data.cambio);
+        const tiro = !!data.tiro;
+        const barrer = !!data.barrer;
+        if (tiro && !this.tiro) this.tiroDown = true;
+        if (!tiro && this.tiro) this.tiroUp = true;
+        if (barrer && !this.barrer) this.barrerDown = true;
+        this.tiro = tiro;
+        this.barrer = barrer;
         if (espacio && !this.espacio) this.espacioDown = true;
         if (!espacio && this.espacio) this.espacioUp = true;
         if (e && !this.e) this.pase = true;
@@ -68,11 +81,15 @@ class Entrada {
         const o = {
             espacioDown: this.espacioDown,
             espacioUp: this.espacioUp,
+            tiroDown: this.tiroDown,
+            tiroUp: this.tiroUp,
+            barrerDown: this.barrerDown,
             pase: this.pase,
             largo: this.largo,
             cambio: this.cambio,
         };
-        this.espacioDown = this.espacioUp = this.pase = this.largo = this.cambio = false;
+        this.espacioDown = this.espacioUp = this.tiroDown = this.tiroUp = this.barrerDown = false;
+        this.pase = this.largo = this.cambio = false;
         return o;
     }
 }
@@ -194,12 +211,14 @@ export class Partido {
             h.keys = { ...L.entrada.keys };
             if (g.isPlaying()) {
                 if (o.espacioDown) h.actionSpace(this.ball);
+                if (o.tiroDown) h.actionShoot(this.ball);
+                if (o.barrerDown) h.actionSlide(this.ball);
                 if (o.cambio) this._cambiarJugador(lado);
                 const activo = L.humano;
                 if (o.pase) activo.actionPass(this.ball, this.players.filter((p) => p.team === lado && p !== activo));
                 if (o.largo) activo.actionLongPass(this.ball);
             }
-            if (o.espacioUp) L.humano.releaseShotCharge(this.ball);
+            if (o.espacioUp || o.tiroUp) L.humano.releaseShotCharge(this.ball);
         }
     }
 

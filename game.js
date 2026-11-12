@@ -59,8 +59,10 @@ const CONFIG = {
     SLIDE_DURATION: 0.26,
     SLIDE_COOLDOWN: 1.25,
     SLIDE_RECOVERY: 0.35,
-    SLIDE_STEAL_RANGE: 16,
-    SLIDE_STEAL_CHANCE: 0.42,
+    SLIDE_STAMINA_COST: 30,   // cada barrida gasta resistencia (con <30 no se puede barrer): evita el spam
+    SLIDE_HIT_RANGE: 22,      // si durante la barrida la pelota queda a esta distancia, se la sacás al rival
+    // Intercepción de pases: un rival que cruza la trayectoria de un pase en vuelo se queda con la pelota.
+    INTERCEPT_RANGE: 18,
 
     // Colisiones entre jugadores
     COLLISION_PUSH: 2.4,
@@ -182,19 +184,24 @@ class Pelota {
         this.owner = null;
         this.kickCooldown = 0;
         this.passDrag = null;   // freno especial de un pase fuerte (null = fricción normal)
+        this.passTeam = null;   // equipo que hizo el pase en vuelo (para poder interceptarlo)
+        this.prevPos = new Vector2D(x, y);   // posición del cuadro anterior (tramo recorrido, para interceptar sin "atravesar" jugadores)
     }
 
     // Un pase sale más fuerte pero frena antes, de modo que alcanza 'range' px y se detiene
     // junto al compañero en vez de pasarse de largo. Con BOOST 1.0 equivale a la fricción original.
-    setPassDrag(power, range) {
+    setPassDrag(power, range, kicker = null) {
+        this.passTeam = kicker ? kicker.team : null;
         this.passDrag = Math.max(0.80, Math.min(CONFIG.BALL_FRICTION, 1 - power / Math.max(1, range)));
     }
 
     update(dt) {
         if (this.kickCooldown > 0) this.kickCooldown--;
 
+        this.prevPos.copy(this.pos);
         if (this.owner) {
             this.passDrag = null;
+            this.passTeam = null;
             const offset = 18;
             let fx = this.owner.facing.x, fy = this.owner.facing.y;
             if (Math.abs(fx) + Math.abs(fy) < 0.1) {
@@ -265,7 +272,9 @@ class Pelota {
     kick(direction, power) {
         this.owner = null;
         this.passDrag = null;
+        this.passTeam = null;
         this.kickCooldown = 18;
+        this._justKicked = true;
         const dir = direction.clone().normalize();
         if (dir.length() < 0.01) dir.set(0, -1);
         this.vel.x = dir.x * power;
@@ -277,6 +286,23 @@ class Pelota {
         this.vel.set(0, 0);
         this.owner = null;
         this.passDrag = null;
+        this.passTeam = null;
+        this.prevPos.set(x, y);
+    }
+
+    // ¿Es un pase en vuelo (libre y con freno de pase) que hizo el equipo contrario a 'team'?
+    esPaseRival(team) {
+        return !this.owner && this.passDrag !== null && !!this.passTeam && this.passTeam !== team;
+    }
+
+    // Distancia mínima entre un punto y el tramo que recorrió la pelota en el último cuadro.
+    distanciaATramo(p) {
+        const ax = this.prevPos.x, ay = this.prevPos.y;
+        const bx = this.pos.x - ax, by = this.pos.y - ay;
+        const len2 = bx * bx + by * by;
+        let t = len2 > 0 ? ((p.x - ax) * bx + (p.y - ay) * by) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        return Math.hypot(p.x - (ax + bx * t), p.y - (ay + by * t));
     }
 }
 
@@ -644,7 +670,7 @@ class Jugador {
         const closestTackler = tackleCandidates.reduce((best, p) =>
             !best || p.pos.distanceTo(ball.pos) < best.pos.distanceTo(ball.pos) ? p : best, null);
         if (owner && owner.team !== this.team && closestTackler === this &&
-            !this.hasBall && !this.isSliding && this.slideCooldown <= 0) {
+            this.puedeBarrer()) {
             const tackleDistance = this.pos.distanceTo(owner.pos);
             const toOwner = this.pos.directionTo(owner.pos);
             const ballInFront = (toOwner.x * this.facing.x + toOwner.y * this.facing.y) > -0.15;
@@ -798,7 +824,7 @@ class Jugador {
                     const needed = Math.max(1.8, Math.min(10.0, distance * (1 - CONFIG.BALL_FRICTION) * 1.12));
                     const power = Math.min(CONFIG.PASS_POWER_MAX, needed * CONFIG.PASS_POWER_BOOST);
                     this._aiKick(ball, dir, power);
-                    ball.setPassDrag(power, distance * 1.12);
+                    ball.setPassDrag(power, distance * 1.12, this);
                     return 'kicked';
                 }
             }
@@ -893,30 +919,35 @@ class Jugador {
         this.slideTimer -= dt;
         this.pos.x += this.facing.x * CONFIG.SLIDE_SPEED;
         this.pos.y += this.facing.y * CONFIG.SLIDE_SPEED;
-        // Intento de robo solo al final de la barrida y cerca de la pelota
+
+        // Si la barrida toca la pelota en cualquier momento del recorrido, se la sacás al rival
+        // (o la recuperás si estaba suelta). Ya no hay azar ni hay que esperar al final.
+        if (ball && !this.hasBall && ball.kickCooldown <= 0 &&
+            this.pos.distanceTo(ball.pos) <= CONFIG.SLIDE_HIT_RANGE) {
+            const dueno = ball.owner;
+            // Al arquero con la pelota en las manos no se le quita.
+            if (!dueno || (dueno !== this && dueno.team !== this.team && !dueno.isGK)) {
+                if (dueno) {
+                    dueno.hasBall = false;
+                    // El dueño anterior recibe un pequeño empujón
+                    const away = dueno.pos.directionTo(this.pos).normalize();
+                    dueno.vel.x -= away.x * 1.8;
+                    dueno.vel.y -= away.y * 1.8;
+                    dueno.hitSlow = Math.max(dueno.hitSlow, 0.28);
+                }
+                ball.owner = this;
+                this.hasBall = true;
+                ball.vel.set(0, 0);
+                ball.passDrag = null;
+                ball.passTeam = null;
+            }
+        }
+
         if (this.slideTimer <= 0) {
             this.isSliding = false;
             this.slideCooldown = CONFIG.SLIDE_COOLDOWN;
             this.vel.set(0, 0);
             this.hitStun = Math.max(this.hitStun, CONFIG.SLIDE_RECOVERY);
-            if (ball && !this.hasBall) {
-                const dist = this.pos.distanceTo(ball.pos);
-                if (dist <= CONFIG.SLIDE_STEAL_RANGE && Math.random() < CONFIG.SLIDE_STEAL_CHANCE) {
-                    if (ball.owner && ball.owner !== this) {
-                        ball.owner.hasBall = false;
-                        // El dueño anterior recibe un pequeño empujón
-                        const away = ball.owner.pos.directionTo(this.pos).normalize();
-                        ball.owner.vel.x -= away.x * 1.8;
-                        ball.owner.vel.y -= away.y * 1.8;
-                        ball.owner.hitSlow = Math.max(ball.owner.hitSlow, 0.28);
-                    }
-                    if (ball.kickCooldown <= 0) {
-                        ball.owner = this;
-                        this.hasBall = true;
-                        ball.vel.set(0, 0);
-                    }
-                }
-            }
         }
     }
 
@@ -983,6 +1014,21 @@ class Jugador {
             }
         }
 
+        // Intercepción: un pase rival en vuelo que pasa por donde estoy parado (o por donde
+        // barro) me lo quedo. Se mira el tramo recorrido en el cuadro para que un pase
+        // rápido no "atraviese" al jugador. Los primeros cuadros después del pase no cuentan.
+        if (!this.isGK && this.hitStun <= 0 && ball.kickCooldown <= 14 && ball.esPaseRival(this.team)) {
+            const alcance = this.isSliding ? Math.max(CONFIG.INTERCEPT_RANGE, CONFIG.SLIDE_HIT_RANGE) : CONFIG.INTERCEPT_RANGE;
+            if (ball.distanciaATramo(this.pos) <= alcance) {
+                ball.owner = this;
+                this.hasBall = true;
+                ball.vel.set(0, 0);
+                ball.passDrag = null;
+                ball.passTeam = null;
+                return;
+            }
+        }
+
         if (ball.kickCooldown > 0) return;
         if (this.isSliding) return;
 
@@ -1004,9 +1050,24 @@ class Jugador {
         if (this.frozen || !this.isHuman) return;
         if (this.hasBall && ball.owner === this) {
             if (!this.shotCharging) { this.shotCharging = true; this.shotCharge = 0; }
-        } else if (!this.hasBall && !this.isSliding && this.slideCooldown <= 0) {
+        } else if (this.puedeBarrer()) {
             this.barrida();
         }
+    }
+
+    // Botón TIRO (táctil): solo carga/dispara. Sin pelota no hace nada (no barre).
+    actionShoot(ball) {
+        if (this.frozen || !this.isHuman) return;
+        if (this.hasBall && ball.owner === this && !this.shotCharging) {
+            this.shotCharging = true;
+            this.shotCharge = 0;
+        }
+    }
+
+    // Botón BARRER (táctil): solo barre (gasta resistencia). Con pelota no hace nada (no tira).
+    actionSlide(ball) {
+        if (this.frozen || !this.isHuman) return;
+        if (this.puedeBarrer()) this.barrida();
     }
 
     releaseShotCharge(ball) {
@@ -1041,7 +1102,7 @@ class Jugador {
         // Pase más fuerte (PASS_POWER_BOOST): sale más rápido y frena para llegar justo al compañero.
         const power = Math.min(CONFIG.PASS_POWER_MAX, needed * CONFIG.PASS_POWER_BOOST);
         ball.kick(dir, power);
-        ball.setPassDrag(power, distance * 1.12);
+        ball.setPassDrag(power, distance * 1.12, this);
         this.hasBall = false;
         this.kickTimer = CONFIG.KICK_ANIM_SEC;
         this.facing.copy(dir);
@@ -1059,7 +1120,7 @@ class Jugador {
         const power = Math.min(CONFIG.PASS_POWER_MAX, CONFIG.LONG_PASS_POWER * CONFIG.PASS_POWER_BOOST);
         ball.kick(dir, power);
         // Mismo alcance que antes (~500 px), recorrido mucho más rápido.
-        ball.setPassDrag(power, CONFIG.LONG_PASS_POWER / (1 - CONFIG.BALL_FRICTION) * 1.1);
+        ball.setPassDrag(power, CONFIG.LONG_PASS_POWER / (1 - CONFIG.BALL_FRICTION) * 1.1, this);
         this.hasBall = false;
         this.kickTimer = CONFIG.KICK_ANIM_SEC;
         console.log('[Pase] Centro / largo');
@@ -1098,8 +1159,19 @@ class Jugador {
         this.kickTimer = CONFIG.KICK_ANIM_SEC;
     }
 
+    // Gasto de resistencia de una barrida (la IA rival lo paga según su perfil de dificultad).
+    costoBarrida() {
+        return CONFIG.SLIDE_STAMINA_COST * (this.diff ? this.diff.staminaDrain : 1);
+    }
+
+    puedeBarrer() {
+        return !this.hasBall && !this.isSliding && this.slideCooldown <= 0 &&
+            this.stamina >= this.costoBarrida();
+    }
+
     barrida() {
-        if (this.hasBall || this.isSliding || this.slideCooldown > 0) return;
+        if (!this.puedeBarrer()) return;
+        this.stamina = Math.max(0, this.stamina - this.costoBarrida());
         this.isSliding = true;
         this.slideTimer = CONFIG.SLIDE_DURATION;
         this.vel.set(0, 0);
@@ -1547,11 +1619,42 @@ class Game {
         this.assets = {};
         this.soundtrack = null;
         this._soundtrackStarted = false;
+        this._musicTracks = [
+            'assets/MUSICA-SOUNDTRACK.mp3',
+            'assets/Final_Surge.mp3',
+            'assets/Before_the_Final_Whistle.mp3'
+        ];
+        this._musicIndex = 0;
         if (typeof Audio !== 'undefined') {
-            this.soundtrack = new Audio('assets/MUSICA-SOUNDTRACK.mp3');
-            this.soundtrack.loop = true;
+            this.soundtrack = new Audio(this._musicTracks[0]);
+            this.soundtrack.loop = false;
             this.soundtrack.volume = 0.32;
             this.soundtrack.preload = 'auto';
+            this.soundtrack.addEventListener('ended', () => this._nextTrack());
+        }
+        // Efectos de sonido (silbato / gol / toques de pelota)
+        this._sfx = null;
+        this._sfxKickIdx = 0;
+        this._sfxKickCooldown = 0;
+        this._prevMatchEstado = null;
+        this._prevBallOwner = null;
+        if (typeof Audio !== 'undefined') {
+            const mk = (src) => {
+                const a = new Audio(src);
+                a.preload = 'auto';
+                a.volume = 0.7;
+                return a;
+            };
+            this._sfx = {
+                whistle: mk('assets/sfx/whistle.mp3'),
+                goal: mk('assets/sfx/goal.mp3'),
+                kicks: [
+                    mk('assets/sfx/kick1.mp3'),
+                    mk('assets/sfx/kick2.mp3'),
+                    mk('assets/sfx/kick3.mp3'),
+                    mk('assets/sfx/kick4.mp3')
+                ]
+            };
         }
         // Preferencias guardadas (música, volumen, dificultad por defecto, etc.)
         this.prefs = (typeof SettingsStore !== 'undefined') ? SettingsStore.get() : {
@@ -1596,6 +1699,7 @@ class Game {
         this.liga = (typeof LigaModo !== 'undefined') ? new LigaModo(this) : null;
         this.badgeImgs = {};
         this.enLinea = false;
+        this._menuOnline = false;   // menú de pausa del modo en línea (el partido sigue corriendo en el servidor)
         this.buscando = false;
         this.socket = null;
         this.miId = '';
@@ -1605,7 +1709,7 @@ class Game {
         this._vistas = new Map();
         this._inputFrame = 0;
         this._inputDirty = false;
-        this.teclas = { w: false, a: false, s: false, d: false, espacio: false, shift: false, e: false, r: false, q: false };
+        this.teclas = { w: false, a: false, s: false, d: false, espacio: false, tiro: false, barrer: false, shift: false, e: false, r: false, q: false };
         this._bindInput();
         this._bindMenu();
         this._bindTouchControls();
@@ -1916,9 +2020,15 @@ class Game {
     _entrarPartido(data) {
         this.buscando = false;
         this.enLinea = true;
+        this._menuOnline = false;
         this._rankingAnotado = false;
         this.rolEnLinea = data && data.rol;
         this.miId = (data && (data.rol === 'Visitante' ? data.visitanteId : data.localId)) || (this.socket && this.socket.id) || '';
+        // Equipos del enfrentamiento (pantalla de carga con VS)
+        if (data && data.equipos) {
+            if (data.equipos.local) this.seleccion.local = data.equipos.local;
+            if (data.equipos.visitante) this.seleccion.rival = data.equipos.visitante;
+        }
         this.menuVisible = false;
         const menu = document.getElementById('main-menu');
         if (menu) menu.style.display = 'none';
@@ -1927,7 +2037,7 @@ class Game {
         this._ocultarEspera();
         this._estadoRed('');
         this._playSoundtrack();
-        this.teclas = { w: false, a: false, s: false, d: false, espacio: false, shift: false, e: false, r: false, q: false };
+        this.teclas = { w: false, a: false, s: false, d: false, espacio: false, tiro: false, barrer: false, shift: false, e: false, r: false, q: false };
         this._inputDirty = false;
         // Partido nuevo y limpio: así los efectos (fx) y el gestor arrancan igual que en offline.
         this._vistas.clear();
@@ -1940,6 +2050,7 @@ class Game {
 
     _salirDeLinea(buscarOtra) {
         this.enLinea = false;
+        this._menuOnline = false;
         this.buscando = false;
         this._netListo = false;
         this._vistas.clear();
@@ -1966,12 +2077,15 @@ class Game {
             KeyD: 'd', ArrowRight: 'd',
             ShiftLeft: 'shift', ShiftRight: 'shift',
             Space: 'espacio',
+            Tiro: 'tiro',        // botón táctil TIRO: solo tira
+            Barrer: 'barrer',    // botón táctil BARRER: solo barre
             KeyE: 'e',
             KeyR: 'r',
             KeyQ: 'q'
         };
         const campo = map[code];
         if (!campo) return false;
+        if (this._menuOnline && down) return true;   // con el menú abierto no se juega
         this.teclas[campo] = down;
         this._inputDirty = true;
         this._emitirInput();
@@ -2040,6 +2154,10 @@ class Game {
         });
         this.players = lista;
         this.ball.owner = dueno;
+        // En online el servidor no marca _justKicked: lo inferimos del kickTimer de algún jugador
+        const anyKick = lista.some(p => (p.kickTimer || 0) > 0.05);
+        if (anyKick && !this._prevAnyKick) this.ball._justKicked = true;
+        this._prevAnyKick = anyKick;
         this.player = lista.find(p => p.id && p.id === mi) || null;
         if (data.equipos) {
             if (data.equipos.local) this.seleccion.local = data.equipos.local;
@@ -2070,6 +2188,7 @@ class Game {
             g.cartelAlpha = 0;
             g.cartelScale = 0.5;
             g.endMenuSelection = 0;
+            this._menuOnline = false;
             this._anotarResultadoRanking(g.cartel);
         } else if (estado === estados.EN_JUEGO || estado === estados.PREPARANDO || estado === estados.CUENTA_REGRESIVA) {
             g.cartel = null;
@@ -2360,28 +2479,84 @@ class Game {
         if (dialog) dialog.classList.remove('open');
     }
 
-    _bindTouchControls() {
-        const pauseButton = document.getElementById('pause-touch');
-        if (pauseButton) pauseButton.addEventListener('click', () => {
-            if (this.enLinea) return;
-            if (!this.gestor || this.gestor.estado === EstadoPartido.FINALIZADO) return;
-            this.gestor.pausado = !this.gestor.pausado;
+    // Pausa (offline / liga) o menú de salida (en línea, donde el servidor no se puede frenar).
+    _alternarPausa() {
+        if (!this.gestor) return;
+        if (this.enLinea) {
+            if (this.gestor.estado === EstadoPartido.FINALIZADO) { this._menuOnline = false; return; }
+            this._menuOnline = !this._menuOnline;
             this.gestor.pauseMenuSelection = 0;
-            this._clearPlayerKeys();
-        });
+            if (this._menuOnline && this.teclas) {      // al abrir el menú se sueltan todas las teclas
+                for (const k of Object.keys(this.teclas)) this.teclas[k] = false;
+                this._inputDirty = true;
+                this._emitirInput();
+            }
+            return;
+        }
+        if (this.gestor.estado === EstadoPartido.FINALIZADO) return;
+        this.gestor.pausado = !this.gestor.pausado;
+        this.gestor.pauseMenuSelection = 0;
+        this._clearPlayerKeys();
+    }
 
-        // Botones de acción (sprint, tiro, pase, cambiar)
+    // Marca BARRER como "sin energía" cuando no alcanza la resistencia, y rotula PAUSA / MENÚ según el modo.
+    _actualizarBotonesTactiles() {
+        if (this._btnBarrer === undefined) {
+            this._btnBarrer = document.querySelector('#touch-controls [data-key="Barrer"]');
+            this._btnPausa = document.getElementById('pause-touch');
+            this._btnBarrerSinEnergia = false;
+        }
+        const p = this.player;
+        if (this._btnBarrer) {
+            const sin = !!(p && !p.isGK && p.stamina < p.costoBarrida());
+            if (sin !== this._btnBarrerSinEnergia) {
+                this._btnBarrerSinEnergia = sin;
+                this._btnBarrer.classList.toggle('sin-energia', sin);
+            }
+        }
+        if (this._btnPausa) {
+            const t = this.enLinea ? 'MENÚ' : 'PAUSA';
+            if (this._btnPausa.textContent !== t) this._btnPausa.textContent = t;
+        }
+    }
+
+    _bindTouchControls() {
+        const zona = document.getElementById('touch-controls');
+        if (zona) zona.addEventListener('contextmenu', e => e.preventDefault());   // sin menú de "mantener presionado"
+
+        const pauseButton = document.getElementById('pause-touch');
+        if (pauseButton) {
+            let ultimo = 0;
+            const alternar = e => {
+                e.preventDefault();
+                const ahora = performance.now();
+                if (ahora - ultimo < 350) return;      // pointerup y click del mismo toque
+                ultimo = ahora;
+                this._alternarPausa();
+            };
+            pauseButton.addEventListener('pointerup', alternar);
+            pauseButton.addEventListener('click', alternar);
+        }
+
+        // Botones de acción (sprint, tiro, barrer, pase, cambiar)
         document.querySelectorAll('#touch-controls [data-key]').forEach(button => {
             const code = button.dataset.key;
+            // El dedo sigue "agarrado" al botón aunque se deslice afuera (si el navegador no lo permite, no pasa nada).
+            const capturar = e => {
+                try { if (button.setPointerCapture && e.pointerId !== undefined) button.setPointerCapture(e.pointerId); } catch (_) {}
+            };
             const down = e => {
                 e.preventDefault();
+                button.classList.add('pulsado');
                 if (this.enLinea) {
                     this._teclaEnLinea(code, true);
-                    if (button.setPointerCapture && e.pointerId !== undefined) button.setPointerCapture(e.pointerId);
+                    capturar(e);
                     return;
                 }
                 if (!this.player || !this.gestor || !this.gestor.isPlaying()) return;
-                if (code === 'Space') this.player.actionSpace(this.ball);
+                if (code === 'Tiro') this.player.actionShoot(this.ball);
+                else if (code === 'Barrer') this.player.actionSlide(this.ball);
+                else if (code === 'Space') this.player.actionSpace(this.ball);
                 else if (code === 'KeyE') this.player.actionPass(this.ball, this.gestor.getLocalTeammates(this.player));
                 else if (code === 'KeyQ') this._switchPlayer();
                 else if (code === 'KeyR') this.player.actionLongPass(this.ball);
@@ -2389,16 +2564,17 @@ class Game {
                     const map = {KeyW:'up',KeyS:'down',KeyA:'left',KeyD:'right',ShiftLeft:'shift'};
                     if (map[code]) this.player.keys[map[code]] = true;
                 }
-                if (button.setPointerCapture && e.pointerId !== undefined) button.setPointerCapture(e.pointerId);
+                capturar(e);
             };
             const up = e => {
                 e.preventDefault();
+                button.classList.remove('pulsado');
                 if (this.enLinea) {
                     this._teclaEnLinea(code, false);
                     return;
                 }
                 if (!this.player) return;
-                if (code === 'Space') this.player.releaseShotCharge(this.ball);
+                if (code === 'Tiro' || code === 'Space') this.player.releaseShotCharge(this.ball);
                 const map = {KeyW:'up',KeyS:'down',KeyA:'left',KeyD:'right',ShiftLeft:'shift'};
                 if (map[code]) this.player.keys[map[code]] = false;
             };
@@ -2417,7 +2593,7 @@ class Game {
         const knob = document.getElementById('joy-knob');
         if (!stick || !knob) return;
 
-        const MAX_RADIUS = 36;       // px que se puede alejar el knob del centro
+        let MAX_RADIUS = 36;         // px que se puede alejar el knob del centro (se ajusta al tamaño real)
         const DEADZONE = 0.18;       // zona muerta relativa (0-1)
         let activePointer = null;
         let originX = 0, originY = 0;
@@ -2482,6 +2658,7 @@ class Game {
             e.preventDefault();
             activePointer = e.pointerId;
             const rect = stick.getBoundingClientRect();
+            MAX_RADIUS = Math.max(22, Math.round(rect.width * 0.305));
             originX = rect.left + rect.width / 2;
             originY = rect.top + rect.height / 2;
             knob.classList.add('active');
@@ -2512,11 +2689,94 @@ class Game {
 
     _playSoundtrack() {
         if (!this.soundtrack) return;
+        if (this.prefs && this.prefs.musicEnabled === false) return;
         const result = this.soundtrack.play();
         if (result && typeof result.then === 'function') {
             result.then(() => { this._soundtrackStarted = true; }).catch(() => {
                 // Los navegadores bloquean autoplay hasta la primera interacción del usuario.
             });
+        }
+    }
+
+    _playSfx(kind) {
+        if (!this._sfx) return;
+        if (this.prefs && this.prefs.sfxEnabled === false) return;
+        const vol = Math.max(0, Math.min(1, Number(this.prefs && this.prefs.sfxVolume) || 0.7));
+        let audio = null;
+        if (kind === 'whistle') audio = this._sfx.whistle;
+        else if (kind === 'goal') audio = this._sfx.goal;
+        else if (kind === 'kick') {
+            // Evitar spam de toques consecutivos (carreras con la pelota)
+            if (this._sfxKickCooldown > 0) return;
+            const kicks = this._sfx.kicks;
+            if (!kicks || !kicks.length) return;
+            this._sfxKickIdx = (this._sfxKickIdx + 1) % kicks.length;
+            audio = kicks[this._sfxKickIdx];
+            this._sfxKickCooldown = 0.12;
+        }
+        if (!audio) return;
+        try {
+            audio.pause();
+            audio.currentTime = 0;
+            audio.volume = vol;
+            const p = audio.play();
+            if (p && typeof p.then === 'function') p.catch(() => {});
+        } catch (e) { /* ignore */ }
+    }
+
+    // Detecta saques, goles y toques de pelota a partir del estado del partido.
+    _updateMatchSfx(dt) {
+        if (this._sfxKickCooldown > 0) this._sfxKickCooldown = Math.max(0, this._sfxKickCooldown - dt);
+        const g = this.gestor;
+        if (!g) {
+            this._prevMatchEstado = null;
+            this._prevBallOwner = null;
+            return;
+        }
+        const estado = g.estado;
+        const prev = this._prevMatchEstado;
+
+        // Silbato en cada saque: arranque (cuenta regresiva → juego) y reanudación tras gol
+        if (estado === EstadoPartido.EN_JUEGO &&
+            (prev === EstadoPartido.CUENTA_REGRESIVA || prev === EstadoPartido.CELEBRANDO_GOL)) {
+            this._playSfx('whistle');
+        }
+        // Gol
+        if (estado === EstadoPartido.CELEBRANDO_GOL && prev !== EstadoPartido.CELEBRANDO_GOL) {
+            this._playSfx('goal');
+        }
+
+        // Toque / patada de pelota: cambio de dueño o patada reciente
+        const owner = this.ball ? this.ball.owner : null;
+        if (estado === EstadoPartido.EN_JUEGO) {
+            if (owner && owner !== this._prevBallOwner) {
+                this._playSfx('kick');
+            } else if (this.ball && this.ball._justKicked) {
+                this._playSfx('kick');
+            }
+        }
+        if (this.ball) this.ball._justKicked = false;
+        this._prevBallOwner = owner;
+        this._prevMatchEstado = estado;
+    }
+
+    _nextTrack() {
+        if (!this.soundtrack || !this._musicTracks || !this._musicTracks.length) return;
+        this._musicIndex = (this._musicIndex + 1) % this._musicTracks.length;
+        const vol = this.soundtrack.volume;
+        const muted = this.soundtrack.muted;
+        this.soundtrack.src = this._musicTracks[this._musicIndex];
+        this.soundtrack.loop = false;
+        this.soundtrack.volume = vol;
+        this.soundtrack.muted = muted;
+        this.soundtrack.preload = 'auto';
+        // Re-attach ended listener in case src change clears it on some browsers
+        this.soundtrack.onended = () => this._nextTrack();
+        if (this.prefs && this.prefs.musicEnabled !== false) {
+            const result = this.soundtrack.play();
+            if (result && typeof result.then === 'function') {
+                result.then(() => { this._soundtrackStarted = true; }).catch(() => {});
+            }
         }
     }
 
@@ -2678,6 +2938,10 @@ class Game {
         this.ball = new Pelota(cx, cy);
         this.gestor = new GestorPartido(this.ball, this.players);
         this.controllableIndex = 0;
+        this._prevMatchEstado = null;
+        this._prevBallOwner = null;
+        this._prevAnyKick = false;
+        this._sfxKickCooldown = 0;
     }
 
 
@@ -2740,7 +3004,11 @@ class Game {
         window.addEventListener('keydown', (e) => {
             // No interceptar teclas mientras se escribe en login / registro / inputs.
             if (escribiendoEnFormulario(e)) return;
-            if (this.enLinea && e.code === 'Escape') return;
+            if (this.enLinea && e.code === 'Escape') {
+                e.preventDefault();
+                this._alternarPausa();
+                return;
+            }
             const enMenuFinal = this.enLinea && this.gestor && this.gestor.estado === EstadoPartido.FINALIZADO;
             if (this.enLinea && !enMenuFinal && this._teclaEnLinea(e.code, true)) {
                 e.preventDefault();
@@ -2860,6 +3128,12 @@ class Game {
             const mx = (e.clientX - rect.left) * scaleX;
             const my = (e.clientY - rect.top) * scaleY;
 
+            if (this.enLinea && this._menuOnline) {
+                const b = this.pauseButtons;
+                if (this._hit(mx, my, b.continuar)) this._menuOnline = false;
+                else if (this._hit(mx, my, b.salir)) { this._menuOnline = false; this._salirDeLinea(false); }
+                return;
+            }
             if (this.gestor.pausado) {
                 const b = this.pauseButtons;
                 if (this._hit(mx, my, b.continuar)) this.gestor.pauseMenuSelection = 0;
@@ -2942,9 +3216,11 @@ class Game {
 
     update(dt) {
         this._updateHinchada(dt);
+        this._actualizarBotonesTactiles();
         if (this.enLinea) {
             if (this._netListo) this._cosmeticaEnLinea(dt);
             if (this.fx && this._netListo && this.gestor && !this.gestor.pausado) this.fx.update(dt);
+            this._updateMatchSfx(dt);
             this._inputFrame++;
             if (this._inputDirty || this._inputFrame % 6 === 0) {
                 this._emitirInput();
@@ -2954,6 +3230,7 @@ class Game {
         }
         if (!this.gestor || this.menuVisible) return;
         this.gestor.update(dt);
+        this._updateMatchSfx(dt);
         if (this.modoLiga && !this.modoLiga.registrado && this.gestor.estado === EstadoPartido.FINALIZADO && this.liga) {
             this.modoLiga.registrado = true;
             this.liga.registrarJugado(this.gestor.golesLocal, this.gestor.golesRival);
@@ -3021,7 +3298,8 @@ class Game {
         if (this.gestor && this.gestor.estado === EstadoPartido.FINALIZADO) {
             this._drawEndMenu(ctx);
         }
-        if (this.gestor && this.gestor.pausado) this._drawPauseMenu(ctx);
+        if (this.gestor && (this.gestor.pausado ||
+            (this.enLinea && this._menuOnline && this.gestor.estado !== EstadoPartido.FINALIZADO))) this._drawPauseMenu(ctx);
     }
 
     // Flecha de dirección de tiro mientras se carga el remate
@@ -3083,33 +3361,103 @@ class Game {
         if (g.estado === EstadoPartido.PREPARANDO) {
             const t = Math.max(0, g.prematchTimer);
             const progress = 1 - (t / CONFIG.PREMATCH_LOAD_SEC);
+            const eqL = this._equipo(this.seleccion && this.seleccion.local);
+            const eqR = this._equipo(this.seleccion && this.seleccion.rival);
+            const titulo = this.enLinea ? 'PARTIDO EN LÍNEA' : 'PREPARANDO PARTIDO';
+
             ctx.save();
-            ctx.fillStyle = 'rgba(2, 8, 23, 0.72)';
+            ctx.fillStyle = 'rgba(2, 8, 23, 0.88)';
             ctx.fillRect(0, 0, W, H);
+
             ctx.fillStyle = '#ffcc00';
-            ctx.font = 'bold 28px Courier New';
+            ctx.font = 'bold 22px Courier New';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText('PREPARANDO PARTIDO', W / 2, H * 0.36);
-            ctx.fillStyle = '#e5edf9';
-            ctx.font = '14px Courier New';
-            ctx.fillText('Cargando controles…', W / 2, H * 0.42);
-            // Barra de progreso
-            const bw = 220, bh = 14, bx = W / 2 - bw / 2, by = H * 0.48;
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 3;
+            ctx.strokeText(titulo, W / 2, H * 0.12);
+            ctx.fillText(titulo, W / 2, H * 0.12);
+
+            const badgeH = 96, badgeW = 80;
+            const cy = H * 0.38;
+            const leftX = W * 0.28;
+            const rightX = W * 0.72;
+
+            const dibujarEquipo = (eq, cx, lado) => {
+                const color = this._teamColor(eq, lado === 'L' ? '#4da3ff' : '#ff6b6b');
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(cx, cy - 8, 58, 0, Math.PI * 2);
+                ctx.fillStyle = color + '22';
+                ctx.fill();
+                ctx.restore();
+
+                const img = eq ? this._badgeImage(eq) : null;
+                if (img && img.width) {
+                    const k = Math.min(badgeW / img.width, badgeH / img.height);
+                    const dw = img.width * k, dh = img.height * k;
+                    ctx.drawImage(img, cx - dw / 2, cy - dh / 2 - 10, dw, dh);
+                } else {
+                    ctx.fillStyle = color;
+                    ctx.fillRect(cx - 36, cy - 48, 72, 86);
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(cx - 36, cy - 48, 72, 86);
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 22px Courier New';
+                    ctx.fillText(eq && eq.siglas ? eq.siglas : '?', cx, cy - 5);
+                }
+
+                const nombre = eq ? (eq.corto || eq.nombre || eq.id) : (lado === 'L' ? 'LOCAL' : 'VISITANTE');
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 13px Courier New';
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 3;
+                let label = String(nombre).toUpperCase();
+                if (label.length > 12) label = label.slice(0, 11) + '…';
+                ctx.strokeText(label, cx, cy + 58);
+                ctx.fillText(label, cx, cy + 58);
+
+                ctx.fillStyle = color;
+                ctx.font = '10px Courier New';
+                const tag = this.enLinea
+                    ? (lado === 'L' ? 'LOCAL' : 'VISITANTE')
+                    : (lado === 'L' ? 'TU EQUIPO' : 'RIVAL');
+                ctx.fillText(tag, cx, cy + 74);
+            };
+
+            dibujarEquipo(eqL, leftX, 'L');
+            dibujarEquipo(eqR, rightX, 'R');
+
+            ctx.fillStyle = '#ffcc00';
+            ctx.font = 'bold 36px Courier New';
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 4;
+            ctx.strokeText('VS', W / 2, cy - 4);
+            ctx.fillText('VS', W / 2, cy - 4);
+
+            ctx.strokeStyle = 'rgba(255,204,0,0.35)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(W * 0.12, H * 0.58);
+            ctx.lineTo(W * 0.88, H * 0.58);
+            ctx.stroke();
+
+            const bw = 260, bh = 12, bx = W / 2 - bw / 2, by = H * 0.64;
             ctx.fillStyle = '#111a2e';
             ctx.fillRect(bx, by, bw, bh);
             ctx.strokeStyle = '#ffcc00';
             ctx.lineWidth = 2;
             ctx.strokeRect(bx, by, bw, bh);
             ctx.fillStyle = '#ffcc00';
-            ctx.fillRect(bx + 2, by + 2, (bw - 4) * progress, bh - 4);
+            ctx.fillRect(bx + 2, by + 2, Math.max(0, (bw - 4) * progress), bh - 4);
             ctx.fillStyle = '#aab6c9';
             ctx.font = '12px Courier New';
-            ctx.fillText(Math.ceil(t) + 's', W / 2, by + 28);
-            // Pista de botones
+            ctx.fillText('Cargando… ' + Math.ceil(t) + 's', W / 2, by + 26);
+
             ctx.fillStyle = '#9ecbff';
             ctx.font = '11px Courier New';
-            ctx.fillText('Joystick · SPRINT · TIRO · PASE · CAMBIAR', W / 2, H * 0.62);
+            ctx.fillText('Joystick · SPRINT · TIRO · PASE · CAMBIAR', W / 2, H * 0.78);
             ctx.restore();
             return;
         }
@@ -3145,8 +3493,13 @@ class Game {
         ctx.textBaseline = 'middle';
         ctx.font = 'bold 38px Courier New';
         ctx.fillStyle = '#ffcc00';
-        ctx.fillText('PARTIDO EN PAUSA', W / 2, 190);
-        const labels = [
+        const online = this.enLinea;
+        ctx.fillText(online ? 'MENÚ' : 'PARTIDO EN PAUSA', W / 2, 190);
+        // En línea el partido no se puede frenar (lo corre el servidor): solo seguir o salir.
+        const labels = online ? [
+            ['CONTINUAR', 'continuar'],
+            ['SALIR DEL PARTIDO', 'salir']
+        ] : [
             ['CONTINUAR', 'continuar'],
             ['REINICIAR', 'reiniciar'],
             ['SALIR DEL PARTIDO', 'salir']
@@ -3167,7 +3520,8 @@ class Game {
         });
         ctx.font = '12px Courier New';
         ctx.fillStyle = '#d6deeb';
-        ctx.fillText('↑ ↓ PARA ELEGIR  ·  ENTER PARA CONFIRMAR  ·  ESC PARA VOLVER', W / 2, H - 34);
+        ctx.fillText(online ? 'EL PARTIDO SIGUE EN CURSO  ·  ESC PARA VOLVER'
+                            : '↑ ↓ PARA ELEGIR  ·  ENTER PARA CONFIRMAR  ·  ESC PARA VOLVER', W / 2, H - 34);
         ctx.restore();
     }
 
@@ -3482,7 +3836,8 @@ class Game {
 
         this._drawScoreBox(ctx, W - 112, 6, g.golesRival, this._teamColor(eqR, '#ff5555'), eqR ? eqR.corto : 'RIVAL', eqR);
 
-        if (g.estado === EstadoPartido.EN_JUEGO) {
+        if (this._tactil === undefined) this._tactil = !!(window.matchMedia && window.matchMedia('(pointer:coarse)').matches);
+        if (g.estado === EstadoPartido.EN_JUEGO && !this._tactil) {   // en el celular no hay teclado: no tapar la cancha
             ctx.fillStyle = 'rgba(0,0,0,0.5)';
             ctx.fillRect(0, CONFIG.HEIGHT - 22, W, 22);
             ctx.fillStyle = '#ccc';
@@ -3709,63 +4064,107 @@ class Game {
         const g = this.gestor;
         const W = CONFIG.WIDTH;
         const H = CONFIG.HEIGHT;
-        const alpha = g.cartelAlpha;
+        const alpha = Math.max(0, Math.min(1, g.cartelAlpha || 0));
+        const result = g.cartel || 'FIN';
+        const resultColors = {
+            VICTORIA: '#48e078',
+            DERROTA: '#ff626c',
+            EMPATE: '#ffd45a'
+        };
+        const resultColor = resultColors[result] || '#ffcc00';
+
+        // En línea, el visitante ve primero su propio resultado y marcador.
+        const soyVisitante = this.enLinea && this.rolEnLinea === 'Visitante';
+        const golesMios = soyVisitante ? g.golesRival : g.golesLocal;
+        const golesRival = soyVisitante ? g.golesLocal : g.golesRival;
 
         ctx.save();
         ctx.globalAlpha = alpha;
 
-        // Fondo oscuro
-        ctx.fillStyle = 'rgba(0,0,0,0.75)';
+        // Pantalla completa de resultado, compartida por los modos local y online.
+        const bg = ctx.createLinearGradient(0, 0, W, H);
+        bg.addColorStop(0, '#071326');
+        bg.addColorStop(0.55, '#102b4d');
+        bg.addColorStop(1, '#050b16');
+        ctx.fillStyle = bg;
         ctx.fillRect(0, 0, W, H);
 
-        // Resultado
-        const resultColors = { VICTORIA: '#2ecc40', DERROTA: '#ff4444', EMPATE: '#ffcc00' };
-        const resultLabel = g.cartel || 'FIN';
-        ctx.font = 'bold 42px Courier New';
+        // Viñeta y resplandor del resultado.
+        const glow = ctx.createRadialGradient(W / 2, 155, 8, W / 2, 155, 250);
+        glow.addColorStop(0, resultColor + '38');
+        glow.addColorStop(1, '#00000000');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, W, H);
+
+        // Marco decorativo.
+        ctx.strokeStyle = resultColor;
+        ctx.globalAlpha = alpha * 0.75;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(13, 13, W - 26, H - 26);
+        ctx.globalAlpha = alpha;
+
+        // Encabezado.
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillText(resultLabel, W / 2 + 3, 150 + 3);
-        ctx.fillStyle = resultColors[resultLabel] || '#ffcc00';
-        ctx.fillText(resultLabel, W / 2, 150);
-        ctx.strokeStyle = '#111';
-        ctx.lineWidth = 2;
-        ctx.strokeText(resultLabel, W / 2, 150);
+        ctx.fillStyle = '#a9c2df';
+        ctx.font = 'bold 13px Courier New';
+        ctx.fillText('LIGA CHAQUITO F8', W / 2, 66);
 
-        // Marcador
-        ctx.font = 'bold 28px Courier New';
+        ctx.shadowColor = resultColor;
+        ctx.shadowBlur = 18;
+        ctx.fillStyle = resultColor;
+        ctx.font = `bold ${result === 'EMPATE' ? 39 : 43}px Courier New`;
+        ctx.fillText(result === 'VICTORIA' ? '¡VICTORIA!' :
+                     result === 'DERROTA' ? 'DERROTA' :
+                     result === 'EMPATE' ? '¡EMPATE!' : 'PARTIDO FINALIZADO', W / 2, 137);
+        ctx.shadowBlur = 0;
+
+        ctx.fillStyle = '#dce8f7';
+        ctx.font = '12px Courier New';
+        ctx.fillText(result === 'VICTORIA' ? '¡Gran partido! Te llevás los tres puntos.' :
+                     result === 'DERROTA' ? 'Fin del partido. ¡A buscar la revancha!' :
+                     'Un partido muy parejo.', W / 2, 181);
+
+        // Marcador principal.
+        const panelX = 42, panelY = 218, panelW = W - 84, panelH = 112;
+        ctx.fillStyle = 'rgba(2, 8, 20, 0.72)';
+        ctx.fillRect(panelX, panelY, panelW, panelH);
+        ctx.strokeStyle = '#42658c';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(panelX, panelY, panelW, panelH);
+
+        ctx.fillStyle = '#9fb4ce';
+        ctx.font = 'bold 10px Courier New';
+        ctx.fillText('TU EQUIPO', W / 2 - 91, panelY + 25);
+        ctx.fillText('RIVAL', W / 2 + 91, panelY + 25);
+
         ctx.fillStyle = '#ffffff';
-        ctx.fillText(`${g.golesLocal}  -  ${g.golesRival}`, W / 2, 210);
+        ctx.font = 'bold 43px Courier New';
+        ctx.fillText(String(golesMios), W / 2 - 91, panelY + 73);
+        ctx.fillText(String(golesRival), W / 2 + 91, panelY + 73);
+        ctx.fillStyle = '#ffcc00';
+        ctx.font = 'bold 30px Courier New';
+        ctx.fillText('-', W / 2, panelY + 69);
 
-        // Botones grandes
-        const btnW = 240;
-        const btnH = 52;
-        const btnX = (W - btnW) / 2;
-        const btn1Y = 300;
-        const btn2Y = 370;
-
+        // Acciones.
         if (this.modoLiga) {
-            // Liga: un solo botón, el resultado ya quedó guardado en la tabla.
             g.endMenuSelection = 0;
-            this.endButtons.revancha = { x: btnX, y: btn1Y, w: btnW, h: btnH };
-            this.endButtons.menu     = { x: -999, y: -999, w: 0, h: 0 };
-            ctx.font = '13px Courier New';
+            this.endButtons.revancha = { x: 85, y: 390, w: 310, h: 58 };
+            this.endButtons.menu = { x: -999, y: -999, w: 0, h: 0 };
             ctx.fillStyle = '#9fe39f';
-            ctx.fillText('Resultado guardado en la liga', W / 2, 262);
+            ctx.font = '12px Courier New';
+            ctx.fillText('RESULTADO GUARDADO EN LA LIGA', W / 2, 365);
             this._drawEndButton(ctx, this.endButtons.revancha, 'CONTINUAR', true);
         } else {
-            this.endButtons.revancha = { x: btnX, y: btn1Y, w: btnW, h: btnH };
-            this.endButtons.menu     = { x: btnX, y: btn2Y, w: btnW, h: btnH };
-
-            this._drawEndButton(ctx, this.endButtons.revancha, 'REVANCHA', g.endMenuSelection === 0);
+            this.endButtons.revancha = { x: 85, y: 365, w: 310, h: 58 };
+            this.endButtons.menu = { x: 85, y: 445, w: 310, h: 58 };
+            this._drawEndButton(ctx, this.endButtons.revancha, this.enLinea ? 'JUGAR OTRA PARTIDA' : 'REVANCHA', g.endMenuSelection === 0);
             this._drawEndButton(ctx, this.endButtons.menu, 'MENÚ PRINCIPAL', g.endMenuSelection === 1);
         }
 
-        // Ayuda
-        ctx.font = '11px Courier New';
-        ctx.fillStyle = '#888';
-        ctx.fillText('↑↓ o W/S para elegir  ·  ENTER o CLIC para confirmar', W / 2, H - 40);
-
+        ctx.fillStyle = '#8195ad';
+        ctx.font = '10px Courier New';
+        ctx.fillText('↑ ↓ / W S PARA ELEGIR  ·  ENTER O CLIC PARA CONFIRMAR', W / 2, H - 48);
         ctx.restore();
     }
 

@@ -352,7 +352,7 @@ const SettingsUI = (() => {
         h += '</div>';
         h += '<div class="cfg-row">';
         h += '<label class="cfg-check"><input type="checkbox" id="cfg-sfx" ' + (p.sfxEnabled ? 'checked' : '') + '> Efectos de sonido</label>';
-        h += '<p class="cfg-hint">Tiros, choques, goles y silbato (cuando estén activos).</p>';
+        h += '<p class="cfg-hint">Silbato en el saque, gol y toques de pelota.</p>';
         h += '</div>';
         h += '<div class="cfg-row">';
         h += '<label class="cfg-slider-label" for="cfg-sfx-vol">Volumen efectos <span id="cfg-sfx-vol-val">' + pct(p.sfxVolume) + '%</span></label>';

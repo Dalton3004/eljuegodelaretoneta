@@ -1,0 +1,147 @@
+{
+  "global": {
+    "preset": "dinamico",
+    "intensidad": 1.0,
+    "sacudida": 1.0,
+    "particulas": 1.0,
+    "estela": true,
+    "festejos": true
+  },
+  "jugadores": {
+    "local_0": {
+      "festejo": "rodillas",
+      "estilo": "normal",
+      "nervio": 1.0,
+      "rebote": 1.0,
+      "inclinacion": 1.0,
+      "respiracion": 1.0
+    },
+    "local_1": {
+      "festejo": "giro",
+      "estilo": "pesado",
+      "nervio": 0.8,
+      "rebote": 0.9,
+      "inclinacion": 1.1,
+      "respiracion": 1.1
+    },
+    "local_2": {
+      "festejo": "baile",
+      "estilo": "ligero",
+      "nervio": 1.3,
+      "rebote": 1.1,
+      "inclinacion": 0.9,
+      "respiracion": 1.0
+    },
+    "local_3": {
+      "festejo": "salto",
+      "estilo": "elastico",
+      "nervio": 1.1,
+      "rebote": 1.2,
+      "inclinacion": 1.0,
+      "respiracion": 0.9
+    },
+    "local_gk": {
+      "festejo": "punos",
+      "estilo": "pesado",
+      "nervio": 0.7,
+      "rebote": 0.8,
+      "inclinacion": 0.8,
+      "respiracion": 1.2
+    },
+    "rival_0": {
+      "festejo": "salto",
+      "estilo": "ligero",
+      "nervio": 1.2,
+      "rebote": 1.0,
+      "inclinacion": 1.0,
+      "respiracion": 1.0
+    },
+    "rival_1": {
+      "festejo": "punos",
+      "estilo": "normal",
+      "nervio": 1.0,
+      "rebote": 1.0,
+      "inclinacion": 1.0,
+      "respiracion": 1.0
+    },
+    "rival_2": {
+      "festejo": "rodillas",
+      "estilo": "elastico",
+      "nervio": 1.4,
+      "rebote": 1.2,
+      "inclinacion": 1.1,
+      "respiracion": 0.9
+    },
+    "rival_3": {
+      "festejo": "giro",
+      "estilo": "pesado",
+      "nervio": 0.9,
+      "rebote": 0.9,
+      "inclinacion": 1.1,
+      "respiracion": 1.1
+    },
+    "rival_gk": {
+      "festejo": "punos",
+      "estilo": "pesado",
+      "nervio": 0.7,
+      "rebote": 0.8,
+      "inclinacion": 0.8,
+      "respiracion": 1.2
+    }
+  },
+  "acciones": {
+    "patada": {
+      "duracion": 0.34,
+      "windup_frac": 0.22,
+      "impacto_frac": 0.56,
+      "cuadro_windup": "S_windup",
+      "cuadro_impacto": "S_kick"
+    },
+    "barrida": {
+      "fases": [
+        {
+          "cuadro": "SL_1",
+          "hasta": 0.2
+        },
+        {
+          "cuadro": "SL_2",
+          "hasta": 0.68
+        },
+        {
+          "cuadro": "SL_3",
+          "hasta": 1.0
+        }
+      ],
+      "levantarse_duracion": 0.42,
+      "levantarse_fases": [
+        {
+          "cuadro": "SL_end",
+          "hasta": 0.42
+        },
+        {
+          "cuadro": "SL_1",
+          "hasta": 0.78
+        }
+      ]
+    },
+    "arquero": {
+      "aterrizaje_duracion": 0.3,
+      "aterrizaje_fases": [
+        {
+          "cuadro": "GK_dive_low_3",
+          "hasta": 0.55
+        },
+        {
+          "cuadro": "GK_ready",
+          "hasta": 1.0
+        }
+      ],
+      "alerta_distancia": 210
+    },
+    "transiciones": {
+      "arranque_duracion": 0.18,
+      "freno_duracion": 0.22,
+      "giro_duracion": 0.2
+    }
+  }
+}

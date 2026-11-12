@@ -1,21 +1,26 @@
 /**
- * Liga Chaquito F8 - Capa de animaciones y "game feel" (FX)
+ * Liga Chaquito F8 - Capa de animaciones y "game feel" (FX v2)
  *
  * Esta capa SOLO MIRA el estado del juego (posición, velocidad, acciones de cada jugador) y
  * dibuja encima: nunca cambia posiciones, pelota, puntaje ni IA. Por eso no puede alterar cómo
  * se juega. Si algo falla, se apaga sola y el juego sigue como antes (ver _fail).
  *
- * Qué agrega:
- *  - Carrera con rebote, inclinación hacia donde corre / acelera, y cansancio visible.
- *  - Patada y pase con estirón elástico, carga de tiro (se agacha y tiembla), control de pelota.
- *  - Frenada con derrape, quiebre de dirección, barrida con polvo y levantarse.
- *  - Parado: respira, mira la jugada (IA) y hace tics propios (saltito, estirarse, sacudirse).
- *  - Arquero: balanceo en la línea, estirada con polvo, queda tendido al recibir un gol.
- *  - Festejo de gol por jugador (salto, giro, baile, puños, rodillas) y lamento del rival.
- *  - Fin de partido: ganadores festejan, perdedores se desinflan.
- *  - Partículas (polvo, pasto, sudor, estrellas, confeti), sacudida de pantalla, estela y giro de pelota.
+ * Qué agrega / mejora (v2):
+ *  - Carrera con curva de zancada (apoyo firme + vuelo), inclinación amortiguada y cansancio.
+ *  - Transiciones idle<->run (impulso de arranque y freno) y giro con contrapeso (sin saltos bruscos).
+ *  - Conducción con micro-toques, protección de pelota y tropezón amortiguado en choques.
+ *  - Patada y pase con anticipación (S_windup al cargar o en los primeros ms), frame de impacto
+ *    (S_kick + destello en el botín) y recuperación elástica con curva "patada".
+ *  - Barrida con easing no lineal (SL_1 entrada -> SL_2 deslizamiento -> SL_3 freno), surco de
+ *    pasto/tierra y recuperación clara en 2 pasos (SL_end -> SL_1 -> parado).
+ *  - Arquero: postura de alerta (GK_ready) cuando la pelota se acerca, estirada diferenciada en
+ *    altura (up = salto, mid = horizontal, low = rasante con pasto), atajada con rebote y
+ *    aterrizaje amortiguado (GK_dive_low_3 -> GK_ready) al volver a pararse.
+ *  - Hinchada: si existe game.hinchada, sacude en tiros al arco / atajadas (safe-call).
+ *  - Partículas (polvo, pasto, sudor, estrellas, confeti, destello de impacto, ondas de choque),
+ *    sacudida de pantalla, estela y estiramiento de la pelota.
  *
- * Configuración por jugador: assets/animaciones.js (lo genera tools/configurar_animaciones.py).
+ * Configuración por jugador y acciones: assets/animaciones.js (tools/configurar_animaciones.py).
  */
 (function (global) {
     'use strict';
@@ -54,10 +59,25 @@
         salto:   t => Math.max(0, 1 - Math.pow(2 * t - 1, 2)),
         rebote:  t => Math.cos(t * TAU * 2.2) * Math.exp(-4.2 * t),
         asentar: t => Math.cos(t * TAU * 1.4) * Math.exp(-5 * t),
-        pulso:   t => Math.sin(Math.PI * t)
+        pulso:   t => Math.sin(Math.PI * t),
+        patada:  t => (t < 0.22 ? -0.55 * Math.sin((t / 0.22) * Math.PI * 0.85)
+                                : Math.cos(((t - 0.22) / 0.78) * Math.PI * 2.4) * Math.exp(-3.8 * ((t - 0.22) / 0.78))),
+        zancada: t => Math.pow(Math.max(0, Math.sin(Math.PI * t)), 0.72)
     };
 
     function userCfg() { return (global.ANIMACIONES && typeof global.ANIMACIONES === 'object') ? global.ANIMACIONES : {}; }
+    function accionesCfg() { return userCfg().acciones || {}; }
+
+    // Verifica si un cuadro existe en SPRITE_ATLAS (para no pedir un frame que no esté en el atlas).
+    function hasFrame(group, name) {
+        try {
+            return !!(typeof SPRITE_ATLAS !== 'undefined' &&
+                      SPRITE_ATLAS.groups &&
+                      SPRITE_ATLAS.groups[group] &&
+                      SPRITE_ATLAS.groups[group].frames &&
+                      SPRITE_ATLAS.groups[group].frames[name]);
+        } catch (e) { return false; }
+    }
 
     function sampleCurve(name, t) {
         t = clamp(t, 0, 1);
@@ -68,7 +88,8 @@
             const a = arr[i], b = arr[Math.min(arr.length - 1, i + 1)];
             return a + (b - a) * f;
         }
-        return FALLBACK_CURVES[name](t);
+        const fn = FALLBACK_CURVES[name] || FALLBACK_CURVES.pulso;
+        return fn(t);
     }
 
     const STAMINA_MAX = () => (typeof CONFIG !== 'undefined' && CONFIG.STAMINA_MAX) || 100;
@@ -101,11 +122,33 @@
             this.index = index;
 
             this.lean = { x: 0, v: 0 };
-            this.tm = { kick: 0, trap: 0, cut: 0, skid: 0, getup: 0, fidget: 0, pop: 0, pivot: 0, burst: 0, ready: 0 };
-            this.du = { kick: 0.30, trap: 0.26, cut: 0.22, skid: 0.26, getup: 0.40, fidget: 0.60, pop: 0.32, pivot: 0.14, burst: 0.28, ready: 0.45 };
+            this.moveBlend = 0;               // 0 = parado, 1 = corriendo (suaviza idle <-> run)
+            this.slideTime = 0;               // tiempo acumulado dentro de una barrida
+            this.diveType = null;             // 'dive_up' | 'dive_mid' | 'dive_low' mientras dura la estirada
+            this.diveTime = 0;
+
+            const ac = accionesCfg();
+            const kDur = (ac.patada && ac.patada.duracion) || 0.34;
+            const gDur = (ac.barrida && ac.barrida.levantarse_duracion) || 0.42;
+            const lDur = (ac.arquero && ac.arquero.aterrizaje_duracion) || 0.30;
+            const tr = ac.transiciones || {};
+
+            this.tm = {
+                kick: 0, trap: 0, cut: 0, skid: 0, getup: 0, fidget: 0, pop: 0, pivot: 0,
+                burst: 0, ready: 0, dribble: 0, shield: 0, stumble: 0, turn: 0,
+                start: 0, stop: 0, gkLand: 0
+            };
+            this.du = {
+                kick: kDur, trap: 0.26, cut: 0.22, skid: 0.26, getup: gDur, fidget: 0.60,
+                pop: 0.32, pivot: 0.14, burst: 0.28, ready: 0.45,
+                dribble: 0.18, shield: 0.24, stumble: 0.25, turn: tr.giro_duracion || 0.20,
+                start: tr.arranque_duracion || 0.18, stop: tr.freno_duracion || 0.22,
+                gkLand: lDur
+            };
             this.readyPending = false;
             this.readyWait = 0;
             this.ampKick = 1;
+            this.esTiro = false;
             this.dirKick = { x: 0, y: -1 };
             this.cutDir = 1;
             this.skidDir = 1;
@@ -114,7 +157,11 @@
             this.nextDribble = 0.18 + this.rng() * 0.16;
             this.prevFacing = { x: p.facing.x, y: p.facing.y };
             this.prevHasBall = !!p.hasBall;
-            this.prev = { kick: 0, hasBall: false, human: false, slide: false, gk: 'stand', speed: 0, vx: 0, vy: 0, c: 1, sprint: false, charging: false };
+            this.prev = {
+                kick: 0, hasBall: false, human: false, slide: false, gk: 'stand',
+                speed: 0, vx: 0, vy: 0, c: 1, sprint: false, charging: false,
+                moving: false, hit: 0
+            };
             this.view = null;
             this.slideDust = 0;
             this.sweatT = 0.5 + this.rng() * 0.5;
@@ -132,6 +179,12 @@
             this.prev.kick = p.kickTimer || 0;
             this.prev.slide = !!p.isSliding;
             this.prev.hasBall = !!p.hasBall;
+            this.prev.moving = false;
+            this.prev.hit = p.hitSquash || 0;
+            this.moveBlend = 0;
+            this.slideTime = 0;
+            this.diveType = null;
+            this.diveTime = 0;
             this.delay = 0.10 + (this.index % 5) * 0.08;
             this.lyingDone = false;
             this.starT = 0;
@@ -155,18 +208,38 @@
             const p = this.p, W = this.W, pr = this.prev;
             const jugando = W.mode === 'juego' && !p.frozen;
 
+            // Transiciones suaves idle <-> run
+            if (jugando && !p.isSliding && !p.isGK) {
+                if (moving && !pr.moving) {
+                    this.tm.start = this.du.start;
+                    if (speed > 0.9) W.dust(p.pos.x - p.facing.x * 5, p.pos.y + 4, 2, 0.9, 2.4);
+                } else if (!moving && pr.moving && pr.speed > 0.85 && this.tm.skid <= 0) {
+                    this.tm.stop = this.du.stop;
+                }
+            }
+            pr.moving = moving;
+
             // Patada / pase
             if (p.kickTimer > pr.kick + 0.002 && jugando) {
                 const b = W.ball;
                 const bs = b ? b.vel.length() : 0;
-                const esTiro = pr.charging;               // venía cargando el tiro = es un tiro; si no, un pase
-                const fuerte = esTiro && bs >= 9;
-                this.ampKick = esTiro ? clamp(0.5 + bs / 12, 0.6, 1.5) : clamp(0.7 + bs / 30, 0.7, 1.15);
+                const esTiro = pr.charging || bs >= 10.5;   // venía cargando o salió un bombazo = tiro
+                const fuerte = esTiro && bs >= 8.5;
+                this.esTiro = esTiro;
+                this.ampKick = esTiro ? clamp(0.65 + bs / 11, 0.75, 1.55) : clamp(0.70 + bs / 28, 0.70, 1.15);
                 this.tm.kick = this.du.kick;
                 this.dirKick = { x: p.facing.x, y: p.facing.y };
-                W.dust(p.pos.x + p.facing.x * 8, p.pos.y + 2 + p.facing.y * 4, fuerte ? 5 : 2, 1.2, 3);
-                if (fuerte && b) { W.shake(1.6); W.sparks(b.pos.x, b.pos.y, 6); }
-                else if (!esTiro && b && bs > 9) W.sparks(b.pos.x, b.pos.y, 3);   // pase fuerte: chispitas
+                const fx = p.pos.x + p.facing.x * 10, fy = p.pos.y + 2 + p.facing.y * 4;
+                W.dust(fx, fy, fuerte ? 5 : 2, 1.3, 3);
+                W.flash(fx, fy - 2, fuerte ? 11 : 7, fuerte ? '#fff6b0' : '#ffffff');
+                if (fuerte && b) {
+                    W.shake(1.9);
+                    W.sparks(b.pos.x, b.pos.y, 7);
+                    W.ring(b.pos.x, b.pos.y, 22);
+                    W.grass(fx, fy + 2, 3);
+                } else if (!esTiro && b && bs > 8.5) {
+                    W.sparks(b.pos.x, b.pos.y, 4);
+                }
             }
             pr.kick = p.kickTimer;
             pr.charging = !!p.shotCharging;
@@ -175,11 +248,18 @@
             if (p.sprinting && !pr.sprint && jugando && speed > 0.8 && !p.isGK) {
                 this.tm.burst = this.du.burst;
                 W.dust(p.pos.x - p.vel.x * 2, p.pos.y + 4, 3, 1.2, 3);
+                W.grass(p.pos.x, p.pos.y + 4, 2);
             }
             pr.sprint = !!p.sprinting;
 
-            // Control de pelota
-            if (p.hasBall && !pr.hasBall && jugando) this.tm.trap = this.du.trap;
+            // Control de pelota (recepción)
+            if (p.hasBall && !pr.hasBall && jugando) {
+                this.tm.trap = this.du.trap;
+                if (W.ball && W.lastBallSpeed > 6.5) {
+                    W.dust(p.pos.x + p.facing.x * 6, p.pos.y + 4, 2, 0.8, 2.2);
+                    W.ring(p.pos.x + p.facing.x * 6, p.pos.y + 2, 12);
+                }
+            }
             pr.hasBall = p.hasBall;
 
             // Jugador activo (el indicador salta a este jugador)
@@ -187,7 +267,6 @@
             pr.human = p.isHuman;
 
             // Toques de conducción: pequeñas acciones visuales sincronizadas con la pelota.
-            // Son exclusivamente de render; no cambian la física ni la posición real.
             if (jugando && p.hasBall && moving && !p.isGK) {
                 this.nextDribble -= dt;
                 if (this.nextDribble <= 0 && this.tm.dribble <= 0) {
@@ -203,10 +282,14 @@
                 this.tm.shield = this.du.shield;
             }
 
-            // Tropezón visual muy corto ante un impacto fuerte. No modifica velocidad ni física.
-            if (jugando && (p.hitSquash || 0) > 0.105 && this.tm.stumble <= 0) {
+            // Contacto / choque fuerte entre jugadores
+            const hit = p.hitSquash || 0;
+            if (jugando && hit > 0.105 && pr.hit <= 0.105) {
                 this.tm.stumble = this.du.stumble;
+                W.dust(p.pos.x, p.pos.y + 3, 2, 1.1, 2.5);
+                if (hit > 0.16) W.sparks(p.pos.x, p.pos.y - 14, 3);
             }
+            pr.hit = hit;
 
             // Giro visual: cuando cambia claramente de dirección, suaviza la transición de postura.
             if (jugando && speed > 0.7 && this.prev.speed > 0.7) {
@@ -215,13 +298,25 @@
             }
 
             // Barrida
-            if (p.isSliding && !pr.slide) { this.slideDust = 0; W.dust(p.pos.x, p.pos.y + 3, 4, 1.5, 3.5); }
-            if (!p.isSliding && pr.slide && jugando) this.tm.getup = this.du.getup;
+            if (p.isSliding && !pr.slide) {
+                this.slideDust = 0;
+                this.slideTime = 0;
+                W.dust(p.pos.x, p.pos.y + 3, 5, 1.6, 3.6);
+                W.grass(p.pos.x, p.pos.y + 4, 3);
+            }
+            if (!p.isSliding && pr.slide && jugando) {
+                this.tm.getup = this.du.getup;
+                W.dust(p.pos.x, p.pos.y + 4, 2, 0.9, 2.4);
+            }
             if (p.isSliding) {
+                this.slideTime += dt;
                 this.slideDust -= dt;
                 if (this.slideDust <= 0) {
-                    this.slideDust = 0.04;
-                    W.dust(p.pos.x - p.facing.x * 10, p.pos.y + 4, 1, 0.8, 3);
+                    this.slideDust = 0.038;
+                    W.dust(p.pos.x - p.facing.x * 10, p.pos.y + 4, 1, 0.9, 3.0);
+                    if (this.slideTime < 0.28 && this.rng() < 0.55) {
+                        W.grass(p.pos.x - p.facing.x * 6, p.pos.y + 4, 1);
+                    }
                 }
             }
             pr.slide = p.isSliding;
@@ -243,11 +338,33 @@
                 }
             }
 
-            // Arquero
-            if (p.isGK && p.gkAction !== pr.gk) {
-                if (typeof p.gkAction === 'string' && p.gkAction.startsWith('dive') && jugando) W.dust(p.pos.x, p.pos.y + 4, 6, 2.2, 4);
-                if (p.gkAction === 'catch' && jugando) { this.tm.trap = this.du.trap; W.shake(0.9); }
-                pr.gk = p.gkAction;
+            // Arquero: estirada (up / mid / low), atajada y aterrizaje al volver a pararse
+            if (p.isGK) {
+                const act = p.gkAction || 'stand';
+                const prevAct = pr.gk || 'stand';
+                const isDive = typeof act === 'string' && act.startsWith('dive');
+                const wasDive = typeof prevAct === 'string' && prevAct.startsWith('dive');
+                if (act !== prevAct && jugando) {
+                    if (isDive) {
+                        this.diveType = act;
+                        this.diveTime = 0;
+                        W.dust(p.pos.x, p.pos.y + 4, 6, 2.2, 4);
+                        if (act === 'dive_low') W.grass(p.pos.x, p.pos.y + 4, 4);
+                    }
+                    if (act === 'catch') {
+                        this.tm.trap = this.du.trap;
+                        W.shake(1.1);
+                        W.ring(p.pos.x, p.pos.y - 10, 20);
+                        W.flash(p.pos.x, p.pos.y - 12, 9, '#ffffff');
+                    }
+                    if (!isDive && act !== 'catch' && (wasDive || prevAct === 'catch')) {
+                        this.tm.gkLand = this.du.gkLand;
+                        W.dust(p.pos.x, p.pos.y + 4, 3, 1.3, 2.8);
+                    }
+                }
+                if (isDive) this.diveTime += dt;
+                else this.diveType = null;
+                pr.gk = act;
             }
 
             // Pisadas al correr
@@ -266,7 +383,15 @@
             const p = this.p, W = this.W;
             this.t += dt;
             const speed = p.vel.length();
-            const moving = speed > 0.3 && !p.isSliding;
+            // Histéresis para no parpadear entre idle y run cuando la velocidad roza 0.3
+            const wasMoving = this.prev.moving;
+            const moving = !p.isSliding && (wasMoving ? speed > 0.14 : speed > 0.30);
+
+            // Blend suave (0..1) entre parado y carrera
+            const targetBlend = moving ? clamp((speed - 0.12) / 1.35, 0.22, 1) : 0;
+            const rate = moving ? 11 : 9;
+            this.moveBlend += (targetBlend - this.moveBlend) * Math.min(1, dt * rate);
+            if (this.moveBlend < 0.01) this.moveBlend = 0;
 
             this._events(dt, speed, moving);
             for (const k in this.tm) if (this.tm[k] > 0) this.tm[k] = Math.max(0, this.tm[k] - dt);
@@ -298,38 +423,62 @@
             const p = this.p, W = this.W, cfg = this.cfg, st = this.estilo;
             const isGK = p.isGK;
             const fatigue = isGK ? 0 : clamp(1 - p.stamina / STAMINA_MAX(), 0, 1);
+            const mb = this.moveBlend;
             let leanT = 0;
 
-            if (moving) {
+            if (mb > 0.02) {
                 const sprint = p.sprinting ? 1 : 0;
                 const ph = p.animClock * (sprint ? 22 : 15);
-                const c = Math.abs(Math.sin(ph));            // 0 = pie en el piso, 1 = en el aire
-                const s = (0.030 + 0.020 * sprint) * st.squash * A * (1 - 0.4 * fatigue);
+                // Curva de zancada con apoyo firme y vuelo redondeado (menos "resorte robótico")
+                const stepPhase = ((ph % Math.PI) + Math.PI) % Math.PI / Math.PI;
+                const c = sampleCurve('zancada', stepPhase);
+                const s = (0.032 + 0.022 * sprint) * st.squash * A * (1 - 0.4 * fatigue) * mb;
                 pose.sy *= 1 + s * (2 * c - 1);
-                pose.sx *= 1 - s * 0.6 * (2 * c - 1);
-                leanT = clamp(p.vel.x / 3.0, -1, 1) * (0.05 + 0.04 * sprint) * st.lean * cfg.inclinacion * A;
-                leanT += clamp((p.vel.x - this.prev.vx) * 0.25, -0.08, 0.08) * A;
-                pose.angle += Math.sin(ph * 0.5 + this.phase) * 0.018 * st.stride * A;
-                pose.bobMul = st.bob * (1 - 0.35 * fatigue);
+                pose.sx *= 1 - s * 0.62 * (2 * c - 1);
+                pose.dy -= (1.1 + 0.8 * sprint) * c * st.bob * A * mb;
+                leanT = clamp(p.vel.x / 2.8, -1, 1) * (0.055 + 0.045 * sprint) * st.lean * cfg.inclinacion * A * mb;
+                leanT += clamp((p.vel.x - this.prev.vx) * 0.26, -0.09, 0.09) * A;
+                pose.angle += Math.sin(ph + this.phase) * 0.022 * st.stride * A * mb;
+                pose.bobMul = st.bob * (1 - 0.35 * fatigue) * (0.35 + 0.65 * mb);
                 if (fatigue > 0.5) {
                     pose.sy *= 1 - 0.035 * fatigue;
                     leanT += (p.vel.x >= 0 ? 1 : -1) * 0.04 * fatigue;
                 }
                 if (p.hasBall) pose.sy *= 0.985;
-            } else {
-                const resp = (0.010 + 0.030 * fatigue) * cfg.respiracion * A;
+            }
+            if (mb < 0.98) {
+                const idleW = 1 - mb;
+                const resp = (0.011 + 0.030 * fatigue) * cfg.respiracion * A * idleW;
                 const w = 2.2 + fatigue * 4.5;
                 const br = Math.sin(this.t * w + this.phase) * resp;
                 pose.sy *= 1 + br;
                 pose.sx *= 1 - br * 0.6;
-                // Muy cansado y parado: se encorva con las manos en las rodillas
                 if (fatigue > 0.5) {
-                    pose.sy *= 1 - 0.045 * fatigue * A;
-                    pose.angle += (p.facing.x >= 0 ? 1 : -1) * 0.05 * fatigue * A;
+                    pose.sy *= 1 - 0.045 * fatigue * A * idleW;
+                    pose.angle += (p.facing.x >= 0 ? 1 : -1) * 0.05 * fatigue * A * idleW;
                 }
-                this._fidget(pose, dt, A);
+                if (!moving) this._fidget(pose, dt, A);
             }
             if (moving && this.tm.fidget > 0) this.tm.fidget = 0;
+
+            // Impulso al arrancar desde parado (agacha 1 instante y empuja hacia adelante)
+            if (this.tm.start > 0) {
+                const k = 1 - this.tm.start / this.du.start;
+                const pu = sampleCurve('pulso', k) * A;
+                const dir = Math.sign(p.vel.x) || (p.facing.x >= 0 ? 1 : -1);
+                pose.sy *= 1 - 0.045 * pu;
+                pose.sx *= 1 + 0.035 * pu;
+                pose.angle += dir * 0.075 * pu * cfg.inclinacion;
+            }
+            // Asentamiento al frenar en seco (inercia suave hacia adelante y rebote)
+            if (this.tm.stop > 0) {
+                const k = 1 - this.tm.stop / this.du.stop;
+                const v = sampleCurve('asentar', k) * A;
+                const dir = (p.facing.x >= 0 ? 1 : -1);
+                pose.sy *= 1 - 0.035 * v;
+                pose.sx *= 1 + 0.025 * v;
+                pose.angle += dir * 0.045 * v * cfg.inclinacion;
+            }
 
             // Sudor cuando está muy cansado
             if (fatigue > 0.55 && !isGK) {
@@ -340,8 +489,7 @@
                 }
             }
 
-            // Conducción: dos microfases de toque para que el jugador no parezca deslizarse
-            // rígidamente cuando lleva la pelota. La amplitud es deliberadamente pequeña.
+            // Conducción: microfases de toque para que no parezca deslizarse rígido con la pelota
             if (this.tm.dribble > 0) {
                 const k = 1 - this.tm.dribble / this.du.dribble;
                 const pulse = Math.sin(Math.PI * k);
@@ -352,7 +500,7 @@
                 pose.sy *= 1 - 0.018 * pulse * A;
             }
 
-            // Protección de pelota: hombro/cadera ligeramente adelantados.
+            // Protección de pelota: hombro/cadera ligeramente adelantados
             if (this.tm.shield > 0 && p.hasBall) {
                 const k = 1 - this.tm.shield / this.du.shield;
                 const pulse = sampleCurve('pulso', k);
@@ -362,34 +510,52 @@
                 pose.sx *= 1 + 0.018 * pulse * A;
             }
 
-            // Tropezón de recuperación: pequeño contrapeso y asentamiento, sin tocar la física.
+            // Tropezón de recuperación ante impactos fuertes
             if (this.tm.stumble > 0) {
                 const k = 1 - this.tm.stumble / this.du.stumble;
                 const v = sampleCurve('asentar', k);
-                pose.angle += (p.vel.x >= 0 ? 1 : -1) * 0.075 * v * A;
-                pose.sy *= 1 - 0.025 * Math.abs(v) * A;
-                pose.dy += 1.2 * Math.max(0, v) * A;
+                pose.angle += (p.vel.x >= 0 ? 1 : -1) * 0.085 * v * A;
+                pose.sy *= 1 - 0.030 * Math.abs(v) * A;
+                pose.dy += 1.3 * Math.max(0, v) * A;
             }
 
-            // Giro: el torso anticipa la dirección antes de volver al centro.
+            // Giro: contrapeso de torso + compresión horizontal suave
             if (this.tm.turn > 0) {
                 const k = 1 - this.tm.turn / this.du.turn;
                 const v = sampleCurve('pulso', k);
                 const sign = Math.sign(p.vel.x - this.prev.vx) || 1;
-                pose.angle += sign * 0.10 * v * cfg.inclinacion * A;
-                pose.sx *= 1 - 0.025 * v * A;
+                pose.angle += sign * 0.11 * v * cfg.inclinacion * A;
+                pose.sx *= 1 - 0.045 * v * A;
+                pose.sy *= 1 - 0.020 * v * A;
             }
 
-            // Golpes de animación
+            // ---------------- PATADA (anticipación -> impacto -> follow-through) ----------------
             if (this.tm.kick > 0) {
+                const ac = accionesCfg().patada || {};
+                const wEnd = ac.windup_frac || 0.22;
+                const iEnd = ac.impacto_frac || 0.56;
                 const k = 1 - this.tm.kick / this.du.kick;
-                const v = sampleCurve('rebote', k) * this.ampKick * A * cfg.rebote;
-                const pu = sampleCurve('pulso', k) * this.ampKick * A;
-                pose.sy *= 1 + 0.13 * v;
-                pose.sx *= 1 - 0.09 * v;
-                pose.angle += (this.dirKick.x >= 0 ? 1 : -1) * 0.10 * pu * (Math.abs(this.dirKick.x) > 0.3 ? 1 : 0.3);
-                pose.dx += this.dirKick.x * 2.2 * pu;
+                const v = sampleCurve('patada', k) * this.ampKick * A * cfg.rebote;
+                const sideSign = this.dirKick.x >= 0 ? 1 : -1;
+                const sideWeight = Math.abs(this.dirKick.x) > 0.25 ? 1 : 0.45;
+
+                // v < 0 en windup (se encoge y echa el torso atrás); v > 0 en el impacto (extiende)
+                pose.sy *= 1 + 0.14 * v;
+                pose.sx *= 1 - 0.10 * v;
+                pose.angle += -sideSign * 0.14 * v * sideWeight;
+                pose.dx += this.dirKick.x * 3.0 * v;
+                pose.dy -= Math.max(0, v) * (this.esTiro ? 2.4 : 1.2);
+
+                if (!isGK && !p.isSliding) {
+                    if (k < wEnd && hasFrame('player', 'S_windup')) {
+                        pose.frameName = 'S_windup';
+                    } else if (k < iEnd && hasFrame('player', 'S_kick')) {
+                        pose.frameName = 'S_kick';
+                    }
+                }
             }
+
+            // ---------------- RECEPCIÓN ----------------
             if (this.tm.trap > 0) {
                 const k = 1 - this.tm.trap / this.du.trap;
                 const v = sampleCurve('asentar', k) * A * cfg.rebote;
@@ -406,12 +572,44 @@
                 pose.angle += -this.skidDir * 0.14 * pu * cfg.inclinacion;
                 pose.sy *= 1 - 0.03 * pu;
             }
-            if (this.tm.getup > 0) {
+
+            // ---------------- BARRIDA + RECUPERACIÓN ----------------
+            if (p.isSliding && !isGK) {
+                // Secuencia con easing: entrada rápida (SL_1) -> deslizamiento largo (SL_2) -> freno (SL_3)
+                const durEst = 0.42;
+                const prog = clamp(this.slideTime / durEst, 0, 1);
+                if (prog < 0.20) {
+                    pose.frameName = 'SL_1';
+                    pose.sy *= 1 - 0.05 * A;
+                    pose.sx *= 1 + 0.04 * A;
+                } else if (prog < 0.70) {
+                    pose.frameName = 'SL_2';
+                    pose.sx *= 1 + 0.06 * (1 - (prog - 0.20) / 0.50) * A;
+                    pose.sy *= 1 - 0.04 * A;
+                } else {
+                    pose.frameName = 'SL_3';
+                    pose.sx *= 1 - 0.03 * A;
+                }
+                pose.bobMul = 0;
+            } else if (this.tm.getup > 0 && !isGK) {
+                // Levantarse legible en 2 escalones: SL_end (apoya manos) -> SL_1 (empuja) -> parado con saltito
                 const k = 1 - this.tm.getup / this.du.getup;
-                const v = sampleCurve('salto', k) * A;
-                pose.dy -= 5 * v;
-                pose.sy *= 1 + 0.06 * v;
+                if (k < 0.38 && !moving) {
+                    pose.frameName = 'SL_end';
+                    pose.sy *= 0.94 + 0.06 * (k / 0.38);
+                } else if (k < 0.72 && !moving) {
+                    pose.frameName = 'SL_1';
+                    const u = (k - 0.38) / 0.34;
+                    pose.dy -= 3.5 * Math.sin(u * Math.PI) * A;
+                    pose.sy *= 0.96 + 0.08 * u;
+                } else {
+                    const u = (k - 0.72) / 0.28;
+                    const v = sampleCurve('salto', u) * A;
+                    pose.dy -= 4.5 * v;
+                    pose.sy *= 1 + 0.06 * v;
+                }
             }
+
             if (this.tm.burst > 0) {
                 const k = 1 - this.tm.burst / this.du.burst;
                 const pu = sampleCurve('pulso', k) * A;
@@ -433,18 +631,72 @@
                 const k = 1 - this.tm.pivot / this.du.pivot;
                 pose.sx *= 1 - 0.12 * sampleCurve('pulso', k) * A;
             }
-            // Carga de tiro: se agacha y, al máximo, tiembla
+
+            // Carga de tiro: se agacha, arma la pierna (S_windup) y al máximo tiembla
             if (p.shotCharging && p.shotChargeMax > 0) {
                 const c = clamp(p.shotCharge / p.shotChargeMax, 0, 1);
-                pose.sy *= 1 - 0.12 * c * A;
-                pose.sx *= 1 + 0.07 * c * A;
-                if (c > 0.92) pose.dx += Math.sin(this.t * 70) * 0.7 * A;
+                const dir = p.facing.x >= 0 ? 1 : -1;
+                pose.sy *= 1 - 0.13 * c * A;
+                pose.sx *= 1 + 0.08 * c * A;
+                pose.angle += -dir * 0.07 * c * A;
+                if (c > 0.25 && !moving && hasFrame('player', 'S_windup')) {
+                    pose.frameName = 'S_windup';
+                }
+                if (c > 0.90) pose.dx += Math.sin(this.t * 70) * 0.75 * A;
             }
-            // Arquero: balanceo sobre la línea y mirada hacia la pelota
-            if (isGK && !(typeof p.gkAction === 'string' && (p.gkAction.startsWith('dive') || p.gkAction === 'catch'))) {
-                pose.dx += Math.sin(this.t * 1.9 + this.phase) * 1.2 * A;
+
+            // ---------------- ARQUERO: alerta, estirada (up/mid/low), atajada y aterrizaje ----------------
+            if (isGK) {
+                const act = p.gkAction || 'stand';
                 const b = W.ball;
-                if (b) leanT += clamp((b.pos.x - p.pos.x) / 220, -1, 1) * 0.05 * A;
+                if (typeof act === 'string' && act.startsWith('dive')) {
+                    const k = clamp(this.diveTime / 0.38, 0, 1);
+                    const arc = Math.sin(k * Math.PI);
+                    const ext = easeOut(Math.min(1, k * 1.4));
+                    if (act === 'dive_up') {
+                        // Vuelo alto al ángulo: despega claro del piso y se estira hacia arriba
+                        pose.dy -= 11 * arc * A;
+                        pose.sy *= 1 + 0.08 * ext * A;
+                        pose.sx *= 1 + 0.05 * ext * A;
+                    } else if (act === 'dive_mid') {
+                        // Vuelo a media altura: extensión horizontal marcada
+                        pose.dy -= 5.5 * arc * A;
+                        pose.sx *= 1 + 0.10 * ext * A;
+                        pose.sy *= 1 - 0.04 * ext * A;
+                    } else {
+                        // Rasante abajo: pegado al pasto y alargado
+                        pose.dy += 2.2 * ext * A;
+                        pose.sx *= 1 + 0.09 * ext * A;
+                        pose.sy *= 1 - 0.07 * ext * A;
+                    }
+                    pose.bobMul = 0;
+                } else if (act === 'catch') {
+                    // Embolsa contra el pecho/piso
+                    pose.sy *= 0.94;
+                    pose.sx *= 1.05;
+                    pose.bobMul = 0;
+                } else {
+                    // En la línea: balanceo + si la pelota está cerca o viene rápido, se agacha en GK_ready
+                    pose.dx += Math.sin(this.t * 1.9 + this.phase) * 1.2 * A;
+                    if (this.tm.gkLand > 0) {
+                        const k = 1 - this.tm.gkLand / this.du.gkLand;
+                        pose.frameName = k < 0.48 ? 'GK_dive_low_3' : 'GK_ready';
+                        const v = sampleCurve('asentar', k) * A;
+                        pose.sy *= 1 - 0.08 * Math.abs(v);
+                        pose.sx *= 1 + 0.05 * Math.abs(v);
+                    } else if (b) {
+                        const distY = Math.abs(b.pos.y - p.pos.y);
+                        const alertDist = (accionesCfg().arquero && accionesCfg().arquero.alerta_distancia) || 210;
+                        const threat = distY < alertDist || b.vel.length() > 7.5;
+                        if (threat) {
+                            pose.frameName = 'GK_ready';
+                            const pulse = Math.abs(Math.sin(this.t * 5.5 + this.phase));
+                            pose.dy -= 1.2 * pulse * A;
+                            pose.sy *= 1 - 0.025 * (1 - pulse) * A;
+                        }
+                        leanT += clamp((b.pos.x - p.pos.x) / 200, -1, 1) * 0.06 * A;
+                    }
+                }
             }
 
             spring(this.lean, leanT, 160, 16, dt);
@@ -493,11 +745,14 @@
                 const dx = b.pos.x - p.pos.x, dy = b.pos.y - p.pos.y;
                 const ax = Math.abs(dx), ay = Math.abs(dy);
                 let dir = this.view ? this.view.dir : p.animDir;
-                if (dir === 'side') { if (ay > ax * 1.5) dir = dy < 0 ? 'up' : 'down'; }
-                else if (ax > ay * 1.5) dir = 'side';
-                else if (ay > 0.01) dir = dy < 0 ? 'up' : 'down';
-                const flip = dir === 'side' ? (ax > 2 ? dx < 0 : (this.view ? this.view.flip : !!p.flipX)) : false;
-                if (this.view && this.view.dir !== dir) this.tm.pivot = this.du.pivot;
+                if (dir === 'side') { if (ay > ax * 1.55) dir = dy < 0 ? 'up' : 'down'; }
+                else if (ax > ay * 1.55) dir = 'side';
+                else if (ay > 1.5) {
+                    if (dir === 'up' && dy > 6) dir = 'down';
+                    else if (dir === 'down' && dy < -6) dir = 'up';
+                }
+                const flip = dir === 'side' ? (ax > 3 ? dx < 0 : (this.view ? this.view.flip : !!p.flipX)) : false;
+                if (this.view && (this.view.dir !== dir || this.view.flip !== flip)) this.tm.pivot = this.du.pivot;
                 this.view = { dir, flip };
             } else this.view = null;
             pose.view = this.view;
@@ -622,6 +877,8 @@
             this.celeb = { team: null, scorer: null };
             this.shakeAmp = 0;
             this.ballSpin = 0;
+            this.lastBallSpeed = 0;
+            this.prevBallVel = { x: 0, y: 0 };
             this.trail = [];
             this.gestorRef = null;
             this.lastOwner = null;
@@ -698,12 +955,16 @@
                 this.celeb = { team, scorer };
                 const goal = local ? CONFIG.GOAL_NORTH : CONFIG.GOAL_SOUTH;
                 const gx = goal.x + goal.w / 2, gy = goal.lineY;
-                this.shake(7);
-                for (let i = 0; i < 14; i++) this.star(gx + (this.rng() - 0.5) * goal.w, gy, (this.rng() - 0.5) * 140, (local ? 1 : -1) * (30 + this.rng() * 80));
-                this.ring(gx, gy, 46);
-                this.confettiT = 1.6;
+                this.shake(7.5);
+                for (let i = 0; i < 16; i++) this.star(gx + (this.rng() - 0.5) * goal.w, gy, (this.rng() - 0.5) * 150, (local ? 1 : -1) * (30 + this.rng() * 85));
+                this.ring(gx, gy, 54);
+                this.ring(gx, gy, 30);
+                this.flash(gx, gy, 24, '#fff6b0');
+                this.confettiT = 1.8;
                 // La hinchada festeja: los del equipo propio todos, los del rival solo una parte
-                if (g.hinchada) g.hinchada.goal(local ? 'north' : 'south', { fraction: local ? 1 : 0.5, duration: 2.8 + 1.2 });
+                if (g.hinchada && typeof g.hinchada.goal === 'function') {
+                    g.hinchada.goal(local ? 'north' : 'south', { fraction: local ? 1 : 0.5, duration: 2.8 + 1.2 });
+                }
             } else if (modo === 'fin') {
                 const l = ge.golesLocal, r = ge.golesRival;
                 this.celeb = { team: l > r ? 'local' : (r > l ? 'rival' : null), scorer: null };
@@ -730,6 +991,19 @@
             else this.ballSpin += sp * 0.05 * (b.vel.x >= 0 ? 1 : -1) * k;
             this.ballSpin %= TAU;
 
+            // Rebote fuerte contra palo / pared: si la pelota iba libre y cambió brusco de dirección
+            if (!b.owner && this.mode === 'juego' && this.lastBallSpeed > 7.5 && sp > 3.5) {
+                const dot = (b.vel.x * this.prevBallVel.x + b.vel.y * this.prevBallVel.y) / (sp * this.lastBallSpeed);
+                if (dot < -0.25) {
+                    this.sparks(b.pos.x, b.pos.y, 5);
+                    this.ring(b.pos.x, b.pos.y, 16);
+                    this.shake(1.1);
+                }
+            }
+            this.lastBallSpeed = sp;
+            this.prevBallVel.x = b.vel.x;
+            this.prevBallVel.y = b.vel.y;
+
             for (const q of this.trail) q.a -= dt * 5;
             this.trail = this.trail.filter(q => q.a > 0);
             if (this.G.estela && !b.owner && sp > 6.5 && this.mode === 'juego') {
@@ -745,7 +1019,7 @@
         }
         _push(q) {
             this.parts.push(q);
-            if (this.parts.length > 240) this.parts.splice(0, this.parts.length - 240);
+            if (this.parts.length > 260) this.parts.splice(0, this.parts.length - 260);
         }
         shake(a) { this.shakeAmp = Math.min(10, Math.max(this.shakeAmp, a)); }
         dust(x, y, n, spread, size) {
@@ -783,7 +1057,12 @@
         }
         ring(x, y, maxR) {
             if (this.calma < 1) return;
-            this._push({ k: 'ring', layer: 0, x, y, vx: 0, vy: 0, life: 0, max: 0.55, size: maxR, g: 0, drag: 0 });
+            this._push({ k: 'ring', layer: 0, x, y, vx: 0, vy: 0, life: 0, max: 0.45, size: maxR, g: 0, drag: 0 });
+        }
+        flash(x, y, size, color) {
+            if (this.calma < 1 || this.G.particulas <= 0) return;
+            this._push({ k: 'flash', layer: 1, x, y, vx: 0, vy: 0, life: 0, max: 0.09, size: size || 9,
+                color: color || '#ffffff', rot: this.rng() * TAU, g: 0, drag: 0 });
         }
         sparks(x, y, n) {
             n = this._n(n);
@@ -803,7 +1082,7 @@
                 if (q.k === 'confetti') q.vx += Math.sin(q.life * 7 + q.ph) * 40 * dt;
                 q.x += q.vx * dt;
                 q.y += q.vy * dt;
-                if (q.rot !== undefined) q.rot += q.vr * dt;
+                if (q.rot !== undefined && q.vr) q.rot += q.vr * dt;
                 out.push(q);
             }
             this.parts = out;
@@ -846,8 +1125,27 @@
                     case 'ring':
                         ctx.strokeStyle = '#fff2a8';
                         ctx.lineWidth = 2;
-                        ctx.beginPath(); ctx.arc(q.x, q.y, Math.max(1, q.size * (1 - a)), 0, TAU); ctx.stroke();
+                        ctx.beginPath(); ctx.arc(q.x, q.y, Math.max(1, q.size * easeOut(1 - a)), 0, TAU); ctx.stroke();
                         break;
+                    case 'flash': {
+                        const r = q.size * (0.65 + 0.55 * (1 - a));
+                        ctx.save();
+                        ctx.translate(q.x, q.y);
+                        ctx.rotate(q.rot);
+                        ctx.fillStyle = q.color;
+                        ctx.globalAlpha = clamp(a * 0.85, 0, 1);
+                        ctx.beginPath();
+                        for (let i = 0; i < 8; i++) {
+                            const rad = i % 2 === 0 ? r : r * 0.28;
+                            const ang = i * Math.PI / 4;
+                            const x = Math.cos(ang) * rad, y = Math.sin(ang) * rad;
+                            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                        }
+                        ctx.closePath();
+                        ctx.fill();
+                        ctx.restore();
+                        break;
+                    }
                     case 'spark':
                         ctx.strokeStyle = '#ffe27a';
                         ctx.lineWidth = 1.5;
@@ -897,9 +1195,9 @@
             const b = this.game.ball;
             if (!b || b.owner) return null;
             const sp = b.vel.length();
-            if (sp < 8) return null;
-            const k = Math.min(0.30, (sp - 8) * 0.03) * this.calma;
-            return { angle: Math.atan2(b.vel.y, b.vel.x), sx: 1 + k, sy: 1 - k * 0.6 };
+            if (sp < 7.5) return null;
+            const k = Math.min(0.32, (sp - 7.5) * 0.032) * this.calma;
+            return { angle: Math.atan2(b.vel.y, b.vel.x), sx: 1 + k, sy: 1 - k * 0.58 };
         }
 
         beginShake(ctx) {
@@ -941,5 +1239,5 @@
         }
     }
 
-    global.FX = { Mundo, EstadoJugador, sampleCurve, version: 1 };
+    global.FX = { Mundo, EstadoJugador, sampleCurve, version: 2 };
 })(typeof window !== 'undefined' ? window : globalThis);
