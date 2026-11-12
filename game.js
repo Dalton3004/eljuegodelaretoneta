@@ -1605,7 +1605,7 @@ class Game {
         this._vistas = new Map();
         this._inputFrame = 0;
         this._inputDirty = false;
-        this.teclas = { w: false, a: false, s: false, d: false, espacio: false, shift: false, e: false, q: false };
+        this.teclas = { w: false, a: false, s: false, d: false, espacio: false, shift: false, e: false, r: false, q: false };
         this._bindInput();
         this._bindMenu();
         this._bindTouchControls();
@@ -1927,8 +1927,15 @@ class Game {
         this._ocultarEspera();
         this._estadoRed('');
         this._playSoundtrack();
-        this.teclas = { w: false, a: false, s: false, d: false, espacio: false, shift: false, e: false, q: false };
+        this.teclas = { w: false, a: false, s: false, d: false, espacio: false, shift: false, e: false, r: false, q: false };
         this._inputDirty = false;
+        // Partido nuevo y limpio: así los efectos (fx) y el gestor arrancan igual que en offline.
+        this._vistas.clear();
+        this._netListo = false;
+        this.ball = new Pelota(CONFIG.WIDTH / 2, CONFIG.HEIGHT / 2);
+        this.players = [];
+        this.player = null;
+        this.gestor = new GestorPartido(this.ball, this.players);
     }
 
     _salirDeLinea(buscarOtra) {
@@ -1960,6 +1967,7 @@ class Game {
             ShiftLeft: 'shift', ShiftRight: 'shift',
             Space: 'espacio',
             KeyE: 'e',
+            KeyR: 'r',
             KeyQ: 'q'
         };
         const campo = map[code];
@@ -1970,53 +1978,68 @@ class Game {
         return true;
     }
 
+    // El servidor corre la MISMA simulación que el modo offline (arqueros, resistencia,
+    // IA, colisiones, cuenta regresiva…). Acá solo se refleja ese estado en los mismos
+    // objetos Jugador / Pelota / GestorPartido que usa el offline, para que el dibujo,
+    // los efectos (fx) y la hinchada se vean exactamente igual.
     _aplicarEstadoJuego(data) {
         if (!data || !data.pelota || !Array.isArray(data.jugadores)) return;
         this._netListo = true;
         if (!this.ball) this.ball = new Pelota(data.pelota.x, data.pelota.y);
         this.ball.pos.set(data.pelota.x, data.pelota.y);
         this.ball.vel.set(data.pelota.vx || 0, data.pelota.vy || 0);
-        this.ball.owner = null;
 
-        const vistos = new Set();
+        const estados = EstadoPartido;
+        const estado = estados[data.estado] || estados.EN_JUEGO;
+        const congelado = estado !== estados.EN_JUEGO;
+        const mi = (this.socket && this.socket.id) || this.miId;
+
         const lista = [];
+        let dueno = null;
         data.jugadores.forEach((j, i) => {
-            const clave = j.id || ((j.rol || 'x') + ':' + i);
-            vistos.add(clave);
+            const clave = 'p' + i;   // el orden del servidor es fijo: la clave no cambia al cambiar de jugador
+            const rival = j.rol === 'Visitante';
             let p = this._vistas.get(clave);
             if (!p) {
-                p = new Jugador(j.x, j.y, {
-                    team: j.rol === 'Visitante' ? 'rival' : 'local',
-                    isHuman: false,
-                    mobilityId: clave
-                });
+                const idMov = (rival ? 'rival_' : 'local_') + (j.gk ? 'gk' : (i % 4));
+                p = new Jugador(j.x, j.y, { team: rival ? 'rival' : 'local', isGK: !!j.gk, isHuman: false, mobilityId: idMov });
                 this._vistas.set(clave, p);
             }
             p.id = j.id || '';
-            p.team = j.rol === 'Visitante' ? 'rival' : 'local';
-            p.isHuman = false;
+            p.team = rival ? 'rival' : 'local';
+            p.isGK = !!j.gk;
+            p.isHuman = !!(p.id && p.id === mi);   // solo el jugador propio muestra su barra de resistencia
             p.pos.set(j.x, j.y);
             p.vel.set(j.vx || 0, j.vy || 0);
-            p.facing.set(j.dirX || 0, j.dirY || (p.team === 'rival' ? 1 : -1));
+            p.facing.set(j.dirX || 0, j.dirY || (rival ? 1 : -1));
             p.hasBall = !!j.tienePelota;
             p.isSliding = !!j.deslizando;
-            p.sprinting = !!j.sprint && p.vel.length() > 0.15;
-            p.moving = p.vel.length() > 0.2;
-            p.frozen = data.estado !== 'EN_JUEGO';
-            const eqId = p.team === 'rival'
+            p.sprinting = !!j.sprint;
+            p.slideTimer = j.sl || 0;
+            p.kickTimer = j.kt || 0;
+            p.hitStun = j.hs || 0;
+            p.hitSlow = j.hw || 0;
+            p.hitFlash = j.hf || 0;
+            p.hitSquash = j.hq || 0;
+            p.shotCharging = !!j.cg;
+            p.shotCharge = j.cc || 0;
+            p.stamina = j.st === undefined ? CONFIG.STAMINA_MAX : j.st;
+            if (p.isGK) {
+                p.gkAction = j.ga || 'stand';
+                p.gkActionTimer = j.gt || 0;
+                p.gkDiveDir = j.gd || 0;
+            }
+            p.frozen = congelado;
+            const eqId = rival
                 ? (data.equipos && data.equipos.visitante)
                 : (data.equipos && data.equipos.local);
             const eq = this._equipo(eqId);
-            if (eq) p.kitName = eq.kit;
-            if (p.isSliding && p.slideTimer <= 0) p.slideTimer = CONFIG.SLIDE_DURATION * 0.5;
-            if (!p.isSliding) p.slideTimer = 0;
+            if (eq && !p.isGK) p.kitName = eq.kit;   // los arqueros conservan su camiseta (igual que offline)
+            if (p.hasBall) dueno = p;
             lista.push(p);
         });
-        for (const clave of [...this._vistas.keys()]) {
-            if (!vistos.has(clave)) this._vistas.delete(clave);
-        }
         this.players = lista;
-        const mi = (this.socket && this.socket.id) || this.miId;
+        this.ball.owner = dueno;
         this.player = lista.find(p => p.id && p.id === mi) || null;
         if (data.equipos) {
             if (data.equipos.local) this.seleccion.local = data.equipos.local;
@@ -2024,57 +2047,56 @@ class Game {
         }
 
         if (!this.gestor) this.gestor = new GestorPartido(this.ball, this.players);
-        this.gestor.ball = this.ball;
-        this.gestor.players = this.players;
-        const antes = this.gestor.estado;
-        this.gestor.golesLocal = data.marcador ? data.marcador.local : 0;
-        this.gestor.golesRival = data.marcador ? data.marcador.visitante : 0;
-        this.gestor.framesRestantes = Math.max(0, data.segundos || 0) * CONFIG.TARGET_FPS;
-        this.gestor.estado = data.estado === 'CELEBRANDO_GOL'
-            ? EstadoPartido.CELEBRANDO_GOL
-            : data.estado === 'FINALIZADO'
-                ? EstadoPartido.FINALIZADO
-                : EstadoPartido.EN_JUEGO;
-        this.gestor.pausado = false;
-        if (this.gestor.estado === EstadoPartido.CELEBRANDO_GOL && antes !== EstadoPartido.CELEBRANDO_GOL) {
-            this.gestor.cartel = 'GOL';
-            this.gestor.cartelAlpha = 0;
-            this.gestor.cartelScale = 0.4;
-        } else if (this.gestor.estado === EstadoPartido.FINALIZADO && antes !== EstadoPartido.FINALIZADO) {
-            const mios = this.rolEnLinea === 'Visitante' ? this.gestor.golesRival : this.gestor.golesLocal;
-            const suyos = this.rolEnLinea === 'Visitante' ? this.gestor.golesLocal : this.gestor.golesRival;
-            this.gestor.cartel = mios > suyos ? 'VICTORIA' : (mios < suyos ? 'DERROTA' : 'EMPATE');
-            this.gestor.cartelAlpha = 0;
-            this.gestor.cartelScale = 0.5;
-            this.gestor.endMenuSelection = 0;
-            this._anotarResultadoRanking(this.gestor.cartel);
-        } else if (this.gestor.estado === EstadoPartido.EN_JUEGO) {
-            this.gestor.cartel = null;
+        const g = this.gestor;
+        g.ball = this.ball;
+        g.players = this.players;
+        const antes = g.estado;
+        g.golesLocal = data.marcador ? data.marcador.local : 0;
+        g.golesRival = data.marcador ? data.marcador.visitante : 0;
+        g.framesRestantes = Math.max(0, data.segundos || 0) * CONFIG.TARGET_FPS;
+        g.prematchTimer = data.prematch || 0;
+        g.countdownNumber = data.cuenta || 0;
+        g.timerFestejo = data.festejo || 0;
+        g.estado = estado;
+        g.pausado = false;
+        if (estado === estados.CELEBRANDO_GOL && antes !== estados.CELEBRANDO_GOL) {
+            g.cartel = 'GOL';
+            g.cartelAlpha = 0;
+            g.cartelScale = 0.4;
+        } else if (estado === estados.FINALIZADO && antes !== estados.FINALIZADO) {
+            const mios = this.rolEnLinea === 'Visitante' ? g.golesRival : g.golesLocal;
+            const suyos = this.rolEnLinea === 'Visitante' ? g.golesLocal : g.golesRival;
+            g.cartel = mios > suyos ? 'VICTORIA' : (mios < suyos ? 'DERROTA' : 'EMPATE');
+            g.cartelAlpha = 0;
+            g.cartelScale = 0.5;
+            g.endMenuSelection = 0;
+            this._anotarResultadoRanking(g.cartel);
+        } else if (estado === estados.EN_JUEGO || estado === estados.PREPARANDO || estado === estados.CUENTA_REGRESIVA) {
+            g.cartel = null;
         }
     }
 
+    // Parte visual que en offline corre dentro de Jugador.update / GestorPartido.update
+    // (animación de piernas, aparición del cartel). Misma lógica, sin tocar la simulación.
     _cosmeticaEnLinea(dt) {
         for (const p of this.players || []) {
-            p.animClock = (p.animClock || 0) + dt;
-            if (p.moving) {
-                p.animTimer = (p.animTimer || 0) + dt;
-                if (p.animTimer > 0.12) {
-                    p.animFrame = ((p.animFrame || 0) + 1) % 4;
-                    p.animTimer = 0;
-                }
-            }
-            const ax = Math.abs(p.facing.x), ay = Math.abs(p.facing.y);
-            if (ax > ay * 1.15) {
-                p.animDir = 'side';
-                p.flipX = p.facing.x < 0;
+            if (p.frozen) {
+                p.moving = false;
+                p.sprinting = false;
+                p.animFrame = 0;
+                p.animClock += dt;
             } else {
-                p.animDir = p.facing.y < 0 ? 'up' : 'down';
+                p._updateAnimation(dt);
             }
         }
         const g = this.gestor;
-        if (g && g.cartel && g.estado !== EstadoPartido.EN_JUEGO) {
+        if (!g) return;
+        if (g.estado === EstadoPartido.CELEBRANDO_GOL) {
             if (g.cartelAlpha < 1) g.cartelAlpha = Math.min(1, g.cartelAlpha + dt * 3);
-            if (g.cartelScale < 1.05) g.cartelScale = Math.min(1.05, g.cartelScale + dt * 1.4);
+            if (g.cartelScale < 1) g.cartelScale = Math.min(1, g.cartelScale + dt * 2.2);
+        } else if (g.estado === EstadoPartido.FINALIZADO) {
+            if (g.cartelAlpha < 1) g.cartelAlpha = Math.min(1, g.cartelAlpha + dt * 1.8);
+            if (g.cartelScale < 1.05) g.cartelScale = Math.min(1.05, g.cartelScale + dt * 1.2);
         }
     }
 
@@ -2550,10 +2572,10 @@ class Game {
         return [
             { key: 'cancha',     src: 'opt/cancha.webp', type: 'image' },
             { key: 'ui_goles',   src: 'opt/ui_goles.webp', type: 'image' },
-            { key: 'cartel_GOL',      src: 'ui/gol.png',      type: 'image' },
-            { key: 'cartel_VICTORIA', src: 'ui/victoria.png', type: 'image' },
-            { key: 'cartel_DERROTA',  src: 'ui/derrota.png',  type: 'image' },
-            { key: 'cartel_EMPATE',   src: 'ui/empate.png',   type: 'image' },
+            { key: 'cartel_GOL',      src: 'ui/gol.png?v=2',      type: 'image' },
+            { key: 'cartel_VICTORIA', src: 'ui/victoria.png?v=2', type: 'image' },
+            { key: 'cartel_DERROTA',  src: 'ui/derrota.png?v=2',  type: 'image' },
+            { key: 'cartel_EMPATE',   src: 'ui/empate.png?v=2',   type: 'image' },
             { key: 'ui_rangos',  src: 'opt/ui_rangos.webp', type: 'image' },
             { key: 'pantalla',   src: 'opt/pantalla.webp', type: 'image' },
             { key: 'logo',       src: 'CHAQUITO FUTBOL.jpg', type: 'image' },
@@ -3570,12 +3592,14 @@ class Game {
 
         const cx = W / 2;
         const cy = H / 2 - 10;
-        const sheet = this.assets.ui_goles;
         let drawn = false;
 
-        // Cartel recortado sin fondo (assets/ui/*.png, generado por tools/build_ui.py)
-        const cut = this.assets['cartel_' + g.cartel];
-        if (cut && !cut.__missing && cut.width > 1) {
+        // Cartel recortado sin fondo (assets/ui/*.png). Si el PNG no cargó (caché vieja, archivo
+        // faltante, servidor distinto…) se recorta en el momento desde la hoja ui_goles, quitándole
+        // el fondo: el cartel NUNCA se dibuja con el rectángulo gris de la hoja.
+        let cut = this.assets['cartel_' + g.cartel];
+        if (!cut || cut.__missing || cut.width <= 1) cut = this._cartelRecortado(g.cartel);
+        if (cut && cut.width > 1) {
             const maxW = 360 * scale;
             const maxH = 190 * scale;
             const k = Math.min(maxW / cut.width, maxH / cut.height);
@@ -3587,25 +3611,6 @@ class Game {
             ctx.drawImage(cut, -dw / 2, -dh / 2, dw, dh);
             ctx.restore();
             drawn = true;
-        }
-
-        if (!drawn && sheet) {
-            const regions = {
-                'GOL':      { sx: 35,   sy: 70,  sw: 1190, sh: 445 },
-                'VICTORIA': { sx: 1260, sy: 125, sw: 1100, sh: 350 },
-                'DERROTA':  { sx: 95,   sy: 575, sw: 1050, sh: 330 },
-                'EMPATE':   { sx: 1360, sy: 575, sw: 900,  sh: 320 }
-            };
-            const reg = regions[g.cartel];
-            if (reg) {
-                const maxW = 390 * scale;
-                const maxH = 180 * scale;
-                const ratio = reg.sw / reg.sh;
-                const dw = Math.min(maxW, maxH * ratio);
-                const dh = dw / ratio;
-                ctx.drawImage(sheet, reg.sx, reg.sy, reg.sw, reg.sh, cx - dw / 2, cy - dh / 2, dw, dh);
-                drawn = true;
-            }
         }
 
         if (!drawn) {
@@ -3630,6 +3635,71 @@ class Game {
             ctx.fillText(`${g.golesLocal}  -  ${g.golesRival}`, cx, cy + 90 * scale);
         }
         ctx.restore();
+    }
+
+    // Recorta un cartel (GOL / VICTORIA / DERROTA / EMPATE) de la hoja ui_goles y le quita el
+    // fondo: se pinta transparente todo lo que, partiendo de los bordes, se parece al color de
+    // fondo. Se hace una sola vez por cartel y queda en caché.
+    _cartelRecortado(nombre) {
+        this._cartelCache = this._cartelCache || {};
+        if (this._cartelCache[nombre] !== undefined) return this._cartelCache[nombre];
+        this._cartelCache[nombre] = null;
+        const sheet = this.assets && this.assets.ui_goles;
+        const regions = {
+            'GOL':      { sx: 35,   sy: 70,  sw: 1190, sh: 445 },
+            'VICTORIA': { sx: 1260, sy: 125, sw: 1100, sh: 350 },
+            'DERROTA':  { sx: 95,   sy: 575, sw: 1050, sh: 330 },
+            'EMPATE':   { sx: 1360, sy: 575, sw: 900,  sh: 320 }
+        };
+        const reg = regions[nombre];
+        if (!sheet || sheet.__missing || !reg) return null;
+        try {
+            // Se trabaja a 1/2 de tamaño: más que suficiente para un cartel de ~360 px.
+            const w = Math.round(reg.sw / 2), h = Math.round(reg.sh / 2);
+            const cv = document.createElement('canvas');
+            cv.width = w; cv.height = h;
+            const c = cv.getContext('2d', { willReadFrequently: true });
+            c.drawImage(sheet, reg.sx, reg.sy, reg.sw, reg.sh, 0, 0, w, h);
+            const img = c.getImageData(0, 0, w, h);
+            const d = img.data;
+            // Color de fondo: promedio de las 4 esquinas
+            const esq = [[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1]];
+            let br = 0, bg = 0, bb = 0;
+            for (const [x, y] of esq) { const i = (y * w + x) * 4; br += d[i]; bg += d[i + 1]; bb += d[i + 2]; }
+            br /= 4; bg /= 4; bb /= 4;
+            const TOL = 46;
+            const esFondo = i => Math.hypot(d[i] - br, d[i + 1] - bg, d[i + 2] - bb) < TOL;
+            const visto = new Uint8Array(w * h);
+            const pila = [];
+            const empujar = (x, y) => {
+                if (x < 0 || y < 0 || x >= w || y >= h) return;
+                const p = y * w + x;
+                if (visto[p] || !esFondo(p * 4)) return;
+                visto[p] = 1; pila.push(p);
+            };
+            for (let x = 0; x < w; x++) { empujar(x, 0); empujar(x, h - 1); }
+            for (let y = 0; y < h; y++) { empujar(0, y); empujar(w - 1, y); }
+            while (pila.length) {
+                const p = pila.pop();
+                const x = p % w, y = (p / w) | 0;
+                d[p * 4 + 3] = 0;
+                empujar(x + 1, y); empujar(x - 1, y); empujar(x, y + 1); empujar(x, y - 1);
+            }
+            // Borde suave: los píxeles pegados al fondo quitado quedan semitransparentes
+            for (let y = 1; y < h - 1; y++) {
+                for (let x = 1; x < w - 1; x++) {
+                    const p = y * w + x;
+                    if (visto[p]) continue;
+                    if (visto[p - 1] || visto[p + 1] || visto[p - w] || visto[p + w]) d[p * 4 + 3] = 200;
+                }
+            }
+            c.putImageData(img, 0, 0);
+            this._cartelCache[nombre] = cv;
+            return cv;
+        } catch (e) {
+            console.warn('[Cartel] no se pudo recortar', nombre, e);
+            return null;
+        }
     }
 
     /**
