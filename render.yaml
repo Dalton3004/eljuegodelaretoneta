@@ -1,0 +1,15 @@
+# Deploy en Render: https://render.com
+# New → Blueprint → este archivo (o Web Service manual).
+services:
+  - type: web
+    name: liga-chaquito-f8
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: PORT
+        generateValue: false

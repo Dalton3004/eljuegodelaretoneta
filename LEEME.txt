@@ -1,0 +1,19 @@
+Liga Chaquito F8 — ONLINE entre todos
+=====================================
+
+Este zip es el juego completo (single, liga, ranking, cuentas, multiplayer).
+
+Para jugar ONLINE entre todos:
+  1. Leé DEPLOY.md
+  2. Publicá en Railway (recomendado), Glitch o Fly.io
+  3. Compartí la URL https que te den
+
+En tu PC (solo local):
+  npm install
+  npm start
+  → http://127.0.0.1:3001
+
+Menú → Configuración → Registrarse / Iniciar sesión
+Jugar → Online → elegir equipo → se emparejan solos.
+
+Victoria = 3 pts · Empate = 1 · Derrota = 0

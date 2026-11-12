@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+    <title>Liga Chaquito F8 - Etapa 4</title>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        :root{color-scheme:dark}
+        body{background:#050b18;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100svh;font-family:system-ui,Arial,sans-serif;color:#fff;overflow:hidden;padding:12px}
+        h1{font-size:clamp(15px,2.2vw,22px);margin-bottom:8px;letter-spacing:3px;color:#ffcc00;text-shadow:2px 3px #000}
+        /* PC / tablet con mouse: tope 480px de ancho lógico */
+        #game-container{position:relative;width:min(calc(100vw - 24px), calc((100svh - 78px)*.75), 960px);aspect-ratio:3/4;border:3px solid #244c83;box-shadow:0 0 32px #ffcc0033;background:#102d20;overflow:hidden;touch-action:none}
+        canvas{display:block;width:100%;height:100%;background:#1a3a1a;touch-action:none}
+        #loading-screen{position:absolute;inset:0;background:#071326;display:flex;flex-direction:column;justify-content:center;align-items:center;z-index:20;transition:opacity .45s}
+        #loading-screen.hidden{opacity:0;pointer-events:none}
+        #loading-bar-container{width:70%;height:16px;background:#222;border:2px solid #667;margin-top:16px}
+        #loading-bar{height:100%;width:0;background:linear-gradient(90deg,#ffcc00,#ff8800);transition:width .15s}
+        #loading-text{margin-top:10px;font-size:.8rem;color:#bbb}
+        #info{margin-top:9px;font-size:clamp(10px,1.6vw,12px);color:#aab6c9;text-align:center;max-width:95vw}
+        #main-menu{position:fixed;inset:0;z-index:15;display:flex;align-items:center;justify-content:center;background:#020817eF;padding:12px}
+        /* PC: portada horizontal 16:9 */
+        #menu-art{position:relative;width:100vw;height:100svh;aspect-ratio:auto;background:#071326 url('assets/opt/pantalla.webp') center/cover no-repeat;border:3px solid #e5b900;box-shadow:0 0 35px #000;overflow:hidden}
+        .menu-hit{position:absolute;border:0;background:transparent;cursor:pointer;border-radius:12px;outline-offset:4px;z-index:2;touch-action:manipulation}
+        /* PC: el menú ocupa todo el viewport; el arte mantiene su proporción mediante cover. */
+        @media (min-width:700px) and (pointer:fine){body{padding:0}#main-menu{padding:0}#menu-art{width:100vw;height:100svh;border:0;border-radius:0;box-shadow:none}}
+        .menu-hit:focus-visible{outline:3px solid white;background:#fff2}
+        /* Zonas clicables PC (arte 16:9) */
+        #play-hit{left:36.5%;top:66%;width:27%;height:22%}
+        #rank-hit{left:10.5%;top:69%;width:24%;height:18%}
+        #settings-hit{left:65.5%;top:69%;width:25%;height:18%}
+        #estado-red{position:absolute;left:0;right:0;top:7%;z-index:5;text-align:center;color:#ffcc00;font-weight:900;letter-spacing:1px;font-size:clamp(18px,3vw,30px);text-shadow:0 2px 0 #000,0 0 10px #000;pointer-events:none;min-height:1.2em}
+        #menu-dialog{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:#020817c9;padding:16px;z-index:12}
+        #menu-dialog.open{display:flex}
+        /* Selector de modo: arte a resolución completa con controles accesibles superpuestos. */
+        #mode-menu{position:fixed;inset:0;z-index:17;background:#020817;overflow:hidden}
+        #mode-menu[hidden]{display:none}
+        #mode-menu-art{position:absolute;inset:0;background:#020817 url('assets/opt/menu_modos_pc.png') center/100% 100% no-repeat}
+        .mode-hit{position:absolute;display:block;border:0;border-radius:14px;background:transparent;cursor:pointer;z-index:2;touch-action:manipulation;outline-offset:4px}
+        .mode-hit:hover{background:#ffffff0b;box-shadow:inset 0 0 0 2px #ffffff22}
+        .mode-hit:active{background:#ffffff20}
+        .mode-hit:focus-visible{outline:3px solid #fff;background:#ffffff22}
+        #mode-solo-hit{left:18%;top:26%;width:64%;height:17%}
+        #mode-online-hit{left:18%;top:44.5%;width:64%;height:17%}
+        #mode-league-hit{left:18%;top:63%;width:64%;height:17%}
+        #mode-back-hit{left:36%;top:82%;width:28%;height:16%}
+        @media (max-width:699px),(pointer:coarse) and (orientation:portrait){
+            #mode-menu-art{
+                inset:50% auto auto 50%;
+                width:min(100vw, calc(100svh * 572 / 1024));
+                height:min(100svh, calc(100vw * 1024 / 572));
+                transform:translate(-50%,-50%);
+                background-image:url('assets/opt/menu_modos_mobile.png');
+            }
+            #mode-solo-hit{left:7%;top:29%;width:86%;height:15%}
+            #mode-online-hit{left:7%;top:46.5%;width:86%;height:15%}
+            #mode-league-hit{left:7%;top:64.5%;width:86%;height:15%}
+            #mode-back-hit{left:24%;top:85%;width:52%;height:10%}
+        }
+        .dialog-card{width:min(94%,480px);max-height:92%;overflow:auto;background:linear-gradient(160deg,#12335c 0%,#0a1c38 45%,#06101f 100%);border:2px solid #ffcc00;border-radius:16px;padding:clamp(18px,3.2vw,28px);box-shadow:0 16px 48px #000c,0 0 0 1px #ffcc0033 inset;color:#fff;text-align:center}
+        .dialog-card.rk-wide,.dialog-card.cfg-wide{width:min(96%,640px);max-height:94%}
+        .dialog-card h2{color:#ffcc00;margin-bottom:6px;font-size:clamp(20px,3.4vw,28px);letter-spacing:2px;text-shadow:0 2px 0 #000}
+        .dialog-card p,.dialog-card label{font-size:clamp(12px,2vw,15px);line-height:1.55;color:#e5edf9}
+        .dialog-card img{width:100%;max-height:48vh;object-fit:contain;border-radius:8px}
+        /* Ranking de jugadores (menú principal) */
+        .rk-head{margin-bottom:10px}
+        .rk-sub{margin:0 0 14px!important;font-size:clamp(11px,2vw,13px)!important;color:#aab6c9!important;letter-spacing:1px}
+        .rk-empty-box{margin:8px 0 14px;padding:18px 14px 16px;border:2px dashed #2d5a96;border-radius:14px;background:linear-gradient(180deg,#0c1f3d,#071326);text-align:center}
+        .rk-empty-icon{font-size:42px;line-height:1;margin-bottom:6px;filter:drop-shadow(0 2px 4px #000)}
+        .rk-empty-title{margin:0 0 6px;font-size:clamp(15px,3vw,18px);font-weight:900;color:#ffcc00;letter-spacing:1px}
+        .rk-empty{margin:0 0 12px;color:#aab6c9;font-size:clamp(12px,2.2vw,14px)!important;line-height:1.5!important}
+        .rk-ready-list{list-style:none;margin:0 auto;padding:0;max-width:32ch;text-align:left;font-size:clamp(11px,2.1vw,13px);color:#cfdcf2}
+        .rk-ready-list li{padding:5px 0;border-top:1px solid #1a3358}
+        .rk-ready-list li:first-child{border-top:0}
+        .rk-ready-list b{color:#ffcc00}
+        .rk-note{margin:12px 0 4px!important;font-size:11px!important;color:#7a8aa3!important;line-height:1.4!important}
+        .rk-scroll{overflow-x:auto;border:2px solid #244c83;border-radius:12px;background:#071326;margin-bottom:4px;box-shadow:inset 0 0 20px #0006}
+        .rk-table{width:100%;border-collapse:collapse;font-size:clamp(12px,2.5vw,15px)}
+        .rk-table th{padding:10px 6px;background:#0d2447;color:#ffcc00;font-size:11px;letter-spacing:1.5px;white-space:nowrap}
+        .rk-table td{padding:9px 6px;border-top:1px solid #16315a;text-align:center;color:#e5edf9}
+        .rk-table .rk-pos{width:48px;font-weight:900;color:#ffcc00}
+        .rk-table .rk-name{text-align:left;padding-left:12px;font-weight:700;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .rk-table .rk-pts{font-weight:900;color:#fff;min-width:40px}
+        .rk-table tr.lider td{background:#1a3a1a;color:#d8ffd8}
+        .rk-table tr.lider .rk-pos,.rk-table tr.lider .rk-pts{color:#ffcc00}
+        .rk-table tr.podium td{background:#122a4a}
+        /* Configuración (panel detallado) */
+        .cfg-head{margin-bottom:8px}
+        .cfg-section{margin:0 0 14px;padding:12px 12px 14px;border:2px solid #244c83;border-radius:14px;background:linear-gradient(180deg,#0c1f3d,#071326);text-align:left}
+        .cfg-sec-title{margin:0 0 10px;font-size:clamp(13px,2.4vw,15px);font-weight:900;letter-spacing:2px;color:#ffcc00}
+        .cfg-row{margin-bottom:10px}
+        .cfg-row:last-child{margin-bottom:0}
+        .cfg-check{display:flex;align-items:center;gap:10px;font-weight:700;color:#e5edf9;cursor:pointer}
+        .cfg-check input{width:18px;height:18px;accent-color:#ffcc00;flex:none}
+        .cfg-hint{margin:4px 0 0;font-size:11px!important;color:#8a9bb5!important;line-height:1.4!important}
+        .cfg-slider-label{display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:700;color:#cfdcf2;margin-bottom:4px}
+        .cfg-slider-label span{color:#ffcc00;font-variant-numeric:tabular-nums}
+        .dialog-card input[type=range]{width:100%;height:8px;border-radius:4px;appearance:none;background:#1a3358;outline:none}
+        .dialog-card input[type=range]::-webkit-slider-thumb{appearance:none;width:18px;height:18px;border-radius:50%;background:#ffcc00;border:2px solid #fff;cursor:pointer;box-shadow:0 2px 6px #000}
+        .dialog-card input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#ffcc00;border:2px solid #fff;cursor:pointer}
+        .cfg-keys{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+        .cfg-key{display:flex;flex-direction:column;gap:2px;padding:8px 8px;border:1px solid #1d3d6c;border-radius:10px;background:#0a1d38;font-size:11px;color:#aab6c9}
+        .cfg-key kbd{display:inline-block;padding:2px 6px;border-radius:5px;background:#16315a;color:#ffcc00;font-weight:800;font-size:11px;letter-spacing:.5px;border:1px solid #2d5a96}
+        .cfg-key span{margin-top:2px}
+        .cfg-diff{display:flex;flex-direction:column;gap:8px}
+        .cfg-diff-btn{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:10px 12px;border:2px solid #2d5a96;border-radius:12px;background:linear-gradient(#0f2748,#08142a);color:#fff;cursor:pointer;font:inherit;text-align:left;transition:border-color .12s,box-shadow .12s,transform .12s}
+        .cfg-diff-btn:hover,.cfg-diff-btn:focus-visible{border-color:#ffcc00;outline:none}
+        .cfg-diff-btn.on{border-color:#ffcc00;box-shadow:0 0 0 2px #ffcc0044,0 4px 14px #0008}
+        .cfg-diff-name{font-size:15px;font-weight:900;letter-spacing:2px}
+        .cfg-diff-name.facil{color:#7be07b}
+        .cfg-diff-name.normal{color:#ffd84a}
+        .cfg-diff-name.dificil{color:#ff6b5e}
+        .cfg-diff-det{font-size:11px;color:#aab6c9}
+        .cfg-data-actions{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+        .action-btn.cfg-mini{margin-top:0;padding:10px 12px;font-size:13px}
+        .cfg-note{margin-top:8px!important;color:#7be07b!important;font-size:12px!important}
+        .cfg-about{text-align:center}
+        .cfg-about-line{margin:0 0 4px;font-size:15px;color:#ffcc00}
+        .cfg-footer{margin-top:4px}
+        .cfg-auth{margin-top:14px;text-align:left}
+        .cfg-auth-tabs{display:flex;gap:6px;margin:8px 0 10px}
+        .cfg-auth-tab{flex:1;padding:10px 8px;border:2px solid #2d5a96;border-radius:9px;background:#0a1d38;color:#aab6c9;font:inherit;font-weight:900;letter-spacing:1px;cursor:pointer}
+        .cfg-auth-tab.on{border-color:#ffcc00;color:#ffcc00;background:#122848}
+        .cfg-field{display:flex;flex-direction:column;gap:4px;margin-bottom:8px}
+        .cfg-field span{font-size:11px;font-weight:800;letter-spacing:1px;color:#aab6c9}
+        .cfg-field input{width:100%;padding:10px 12px;border:2px solid #2d5a96;border-radius:10px;background:#071326;color:#fff;font:inherit;outline:none}
+        .cfg-field input:focus{border-color:#ffcc00}
+        .cfg-auth-msg{margin:4px 0 8px!important;font-size:12px!important;font-weight:700}
+        .cfg-auth-msg.err{color:#ff8a80!important}
+        .cfg-auth-msg.ok{color:#7be07b!important}
+        .cfg-session{text-align:center}
+        .cfg-session-name{margin:4px 0 6px;font-size:clamp(18px,4vw,24px);font-weight:900;color:#ffcc00;letter-spacing:1px}
+        .cfg-historial{list-style:none;margin:8px 0 10px;padding:0;text-align:left;max-height:140px;overflow:auto}
+        .cfg-historial li{padding:6px 8px;margin-bottom:4px;border-radius:8px;background:#0a1d38;border:1px solid #1d3d6c;font-size:12px;color:#d5deea}
+        @media (max-width:420px){
+            .cfg-keys{grid-template-columns:1fr}
+            .dialog-card.rk-wide,.dialog-card.cfg-wide{width:min(98%,100%)}
+        }
+        .action-btn{display:block;width:100%;margin-top:12px;padding:12px 16px;border:2px solid #ffe36b;border-radius:9px;background:linear-gradient(#ffdc35,#e89b00);color:#15100a;font-weight:900;font-size:clamp(14px,2vw,17px);cursor:pointer;box-shadow:0 4px #8a5200}
+        .action-btn.secondary{background:linear-gradient(#1677d2,#08458d);border-color:#72baff;color:white;box-shadow:0 4px #032b5b}
+        .action-btn:active{transform:translateY(2px);box-shadow:0 2px #8a5200}
+        #touch-controls{display:none;position:absolute;inset:auto 0 10px;z-index:5;justify-content:space-between;align-items:end;padding:0 10px;pointer-events:none}
+        .touch-actions{display:grid;grid-template-columns:repeat(2,52px);gap:6px;pointer-events:auto}
+        .touch-controls button{border:1px solid #ffffff99;border-radius:10px;background:#071326c8;color:white;font-weight:800;font-size:12px;min-height:42px;touch-action:none;user-select:none;-webkit-user-select:none}
+        /* Joystick virtual deslizante */
+        .touch-joystick{position:relative;width:118px;height:118px;pointer-events:auto;touch-action:none;user-select:none;-webkit-user-select:none}
+        .joy-base{position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle at 40% 35%,#1a3a5fcc,#071326cc);border:2px solid #ffffff55;box-shadow:inset 0 0 18px #0008,0 4px 12px #0006}
+        .joy-knob{position:absolute;left:50%;top:50%;width:48px;height:48px;margin:-24px 0 0 -24px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#ffdc55,#e89b00 55%,#a86a00);border:2px solid #fff8;box-shadow:0 3px 10px #000a,inset 0 1px 0 #fff6;transition:none;will-change:transform}
+        .joy-knob.active{background:radial-gradient(circle at 35% 30%,#ffe97a,#ffb020 55%,#c07a00);box-shadow:0 2px 8px #000a,0 0 14px #ffcc0044,inset 0 1px 0 #fff8}
+        .joy-hint{position:absolute;left:0;right:0;bottom:-16px;text-align:center;font-size:9px;font-weight:700;color:#ffffff88;letter-spacing:.5px;pointer-events:none}
+        /* ---- Selección de equipo ---- */
+        #team-select{position:fixed;inset:0;z-index:18;overflow-y:auto;background:radial-gradient(circle at 50% 0,#10325f,#020817 70%);padding:14px 12px 28px;-webkit-overflow-scrolling:touch}
+        #team-select[hidden]{display:none}
+        .ts-wrap{max-width:820px;margin:0 auto;text-align:center}
+        #ts-title{color:#ffcc00;font-size:clamp(20px,4vw,32px);letter-spacing:3px;text-shadow:2px 3px #000;margin-top:4px}
+        #ts-sub{color:#cfdcf2;font-size:clamp(12px,2.2vw,15px);margin:6px 0 14px}
+        #ts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:10px}
+        .ts-tile{position:relative;display:flex;flex-direction:column;align-items:center;gap:6px;padding:0 6px 10px;border:2px solid #2d5a96;border-radius:12px;background:linear-gradient(#0f2748,#08142a);color:#fff;cursor:pointer;overflow:hidden;font:inherit;transition:transform .12s,border-color .12s,box-shadow .12s}
+        .ts-tile:hover,.ts-tile:focus-visible{border-color:#ffcc00;transform:translateY(-2px);box-shadow:0 6px 18px #000a,0 0 0 2px #ffcc0055;outline:none}
+        .ts-tile:active{transform:translateY(1px)}
+        .ts-tile.current{border-color:#ffcc00}
+        .ts-bar{align-self:stretch;height:8px;margin:0 -6px;background:linear-gradient(90deg,var(--c1) 0 33.4%,var(--c2) 33.4% 66.7%,var(--c3) 66.7%)}
+        .ts-art{position:relative;width:100%;height:112px;display:flex;justify-content:center;align-items:flex-end}
+        .ts-sprite{height:104px;width:auto!important;background:transparent!important;image-rendering:auto;filter:drop-shadow(0 3px 2px #0009)}
+        .ts-badge{position:absolute;top:2px;right:0;width:34px;height:40px;object-fit:contain;border-radius:5px}
+        .ts-name{font-size:clamp(11px,2.4vw,13px);font-weight:800;letter-spacing:.5px;line-height:1.15}
+        .ts-warn{font-size:9px;font-weight:700;color:#ffb347;background:#3a2300;border:1px solid #ffb34788;border-radius:6px;padding:1px 5px}
+        .ts-actions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:16px}
+        .ts-actions .action-btn{width:auto;min-width:190px;margin-top:0}
+        /* ---- Selección de dificultad ---- */
+        #ts-grid.diff-grid{grid-template-columns:1fr;max-width:460px;margin:0 auto;gap:12px}
+        .ts-diff{position:relative;display:flex;flex-direction:column;align-items:center;gap:5px;padding:14px 14px 16px;border:2px solid #2d5a96;border-radius:14px;background:linear-gradient(#0f2748,#08142a);color:#fff;cursor:pointer;font:inherit;transition:transform .12s,border-color .12s,box-shadow .12s}
+        .ts-diff:hover,.ts-diff:focus-visible{border-color:#ffcc00;transform:translateY(-2px);box-shadow:0 6px 18px #000a,0 0 0 2px #ffcc0055;outline:none}
+        .ts-diff:active{transform:translateY(1px)}
+        .ts-diff.current{border-color:#ffcc00}
+        .ts-diff-pips{display:flex;gap:6px}
+        .ts-diff-pips i{width:26px;height:8px;border-radius:4px;background:#ffffff26}
+        .ts-diff-facil .ts-diff-pips i.on{background:#5fd35f}
+        .ts-diff-normal .ts-diff-pips i.on{background:#ffcc00}
+        .ts-diff-dificil .ts-diff-pips i.on{background:#ff4a3d}
+        .ts-diff-name{font-size:clamp(20px,5vw,26px);font-weight:900;letter-spacing:3px}
+        .ts-diff-facil .ts-diff-name{color:#7be07b}.ts-diff-normal .ts-diff-name{color:#ffd84a}.ts-diff-dificil .ts-diff-name{color:#ff6b5e}
+        .ts-diff-lema{font-size:clamp(12px,2.6vw,14px);font-weight:700;color:#e5edf9}
+        .ts-diff-det{font-size:clamp(11px,2.3vw,13px);line-height:1.4;color:#aab6c9;max-width:34ch}
+        .ts-diff-dificil{border-color:#8a2a22;background:linear-gradient(#2a0f12,#12080b)}
+        .ts-diff-dificil:hover,.ts-diff-dificil:focus-visible,.ts-diff-dificil.current{border-color:#ff6b5e;box-shadow:0 6px 18px #000a,0 0 0 2px #ff6b5e55}
+        #ts-random[hidden]{display:none}
+        /* ---- Espera de rival (en línea) ---- */
+        #espera-rival{position:fixed;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;padding:16px;background:radial-gradient(circle at 50% 0,#10325f,#020817 72%)}
+        #espera-rival[hidden]{display:none}
+        .espera-card{width:min(92%,420px);text-align:center;background:linear-gradient(145deg,#102b50,#071326);border:2px solid #ffcc00;border-radius:16px;padding:clamp(18px,4vw,32px);box-shadow:0 16px 48px #000}
+        .espera-card h2{color:#ffcc00;letter-spacing:2px;font-size:clamp(20px,4vw,30px);text-shadow:2px 3px #000;margin-bottom:8px}
+        #espera-sub{color:#e5edf9;font-size:clamp(13px,2.4vw,16px);line-height:1.45;min-height:2.8em}
+        .espera-escudo{display:flex;flex-direction:column;align-items:center;gap:8px;margin-bottom:12px}
+        .espera-escudo img{width:84px;height:100px;object-fit:contain;filter:drop-shadow(0 4px 4px #000)}
+        .espera-escudo p{font-weight:900;letter-spacing:1px;color:#fff}
+        .espera-pista{height:14px;margin:16px auto;width:78%;background:#111a2e;border:2px solid #667;overflow:hidden;border-radius:3px}
+        .espera-pista span{display:block;height:100%;width:40%;background:linear-gradient(90deg,#ffcc00,#ff8800);animation:espera-barra 1.1s ease-in-out infinite}
+        @keyframes espera-barra{0%{transform:translateX(-120%)}100%{transform:translateX(280%)}}
+        .espera-card .action-btn{margin-top:8px}
+/* ---- Liga offline ---- */
+        #liga-screen{position:fixed;inset:0;z-index:19;overflow-y:auto;background:radial-gradient(circle at 50% 0,#10325f,#020817 70%);padding:14px 10px 28px;-webkit-overflow-scrolling:touch}
+        #liga-screen[hidden]{display:none}
+        .lg-wrap{position:relative;max-width:640px;margin:0 auto;text-align:center}
+        .lg-title{color:#ffcc00;font-size:clamp(20px,4vw,30px);letter-spacing:3px;text-shadow:2px 3px #000}
+        .lg-sub{color:#cfdcf2;font-size:clamp(10px,2.2vw,13px);letter-spacing:1px;margin:4px 0 12px}
+        .lg-toast{position:fixed;left:50%;top:10px;transform:translate(-50%,-140%);z-index:5;max-width:92vw;padding:9px 16px;border-radius:10px;background:#0b2a14;border:2px solid #5fd35f;color:#d8ffd8;font-weight:800;font-size:13px;box-shadow:0 6px 20px #000a;transition:transform .25s;pointer-events:none}
+        .lg-toast.on{transform:translate(-50%,0)}
+        .lg-next{background:linear-gradient(145deg,#102b50,#071326);border:2px solid #ffcc00;border-radius:14px;padding:12px 12px 14px;margin-bottom:12px;box-shadow:0 8px 28px #000a}
+        .lg-next-label{color:#ffcc00;font-size:11px;font-weight:900;letter-spacing:2px}
+        .lg-vs{display:flex;align-items:center;justify-content:center;gap:10px;margin:8px 0 2px}
+        .lg-vs-t{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;font-size:clamp(11px,2.6vw,14px);letter-spacing:.5px}
+        .lg-vs-x{color:#ffcc00;font-weight:900;font-size:18px}
+        .lg-next .action-btn{margin-top:10px}
+        .lg-final-t{color:#ffcc00;font-size:clamp(20px,5vw,28px);font-weight:900;letter-spacing:2px;margin-top:6px}
+        .lg-final p{margin-top:6px;color:#e5edf9;font-size:14px}
+        .lg-badge{width:20px;height:24px;object-fit:contain;flex:none}
+        .lg-badge.big{width:54px;height:64px;filter:drop-shadow(0 3px 3px #000)}
+        .lg-tabs{display:flex;gap:6px;margin-bottom:8px}
+        .lg-tabs button{flex:1;padding:10px;border:2px solid #2d5a96;border-radius:9px;background:#0a1d38;color:#aab6c9;font:inherit;font-weight:900;letter-spacing:2px;cursor:pointer}
+        .lg-tabs button.on{border-color:#ffcc00;background:#17335d;color:#ffcc00}
+        .lg-scroll{overflow-x:auto;border:2px solid #244c83;border-radius:10px;background:#071326}
+        .lg-table{width:100%;border-collapse:collapse;font-size:clamp(11px,2.6vw,14px)}
+        .lg-table th{padding:7px 4px;background:#0d2447;color:#ffcc00;font-size:10px;letter-spacing:1px}
+        .lg-table td{padding:6px 4px;border-top:1px solid #16315a;text-align:center;color:#e5edf9}
+        .lg-table .l{text-align:left;padding-left:8px}
+        .lg-table td.l{display:flex;align-items:center;gap:6px;white-space:nowrap}
+        .lg-table td.pts{font-weight:900;color:#fff}
+        .lg-table tr.lider td:first-child{color:#ffcc00;font-weight:900}
+        .lg-table tr.mio td{background:#16335d;color:#fff;font-weight:700}
+        .lg-fnav{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+        .lg-fnav button{width:48px;height:42px;border:2px solid #2d5a96;border-radius:9px;background:#0a1d38;color:#ffcc00;font-size:16px;cursor:pointer}
+        .lg-fnav button:disabled{opacity:.3;cursor:default}
+        .lg-fnav div{display:flex;flex-direction:column;gap:2px}
+        .lg-fnav b{color:#ffcc00;font-size:18px;letter-spacing:2px}
+        .lg-fnav span{font-size:11px;color:#aab6c9;letter-spacing:1px}
+        .lg-matches{display:flex;flex-direction:column;gap:6px}
+        .lg-m{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;padding:9px 8px;border:2px solid #1d3d6c;border-radius:10px;background:#0a1d38;font-size:clamp(11px,2.7vw,14px)}
+        .lg-m.mio{border-color:#ffcc00;background:#17335d}
+        .lg-m-t{display:flex;align-items:center;gap:6px;min-width:0;font-weight:700}
+        .lg-m-t.izq{justify-content:flex-end;text-align:right}
+        .lg-m-t span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .lg-m-sc{display:flex;align-items:center;gap:5px;min-width:54px;justify-content:center;font-size:17px}
+        .lg-m-sc b{color:#fff}.lg-m-sc i{color:#667;font-style:normal}.lg-m-sc em{color:#667;font-style:normal;font-size:12px}
+        .lg-actions{margin-top:14px}
+        .lg-mini{font-size:11px!important;color:#aab6c9!important;margin-top:4px;line-height:1.4!important}
+        .lg-saved{display:flex;align-items:center;gap:6px;margin-top:8px;padding:8px;border:1px solid #2d5a96;border-radius:9px;background:#0a1d38;text-align:left}
+        .lg-saved-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;font-size:12px}
+        .lg-saved-info span{color:#aab6c9;font-size:10px}
+        .lg-mini-btn{padding:8px 9px;border:2px solid #72baff;border-radius:8px;background:#08458d;color:#fff;font-weight:900;font-size:11px;cursor:pointer}
+        .lg-mini-btn.borrar{border-color:#ff6b5e;background:#5a1410}
+        @media (max-width:420px){#ts-grid{grid-template-columns:repeat(2,1fr)}}
+        /* Celular / pantalla táctil */
+        @media (pointer:coarse){
+            #touch-controls{display:flex}
+            #info{display:none}
+            h1{display:none}
+            body{
+                padding:0;
+                padding:env(safe-area-inset-top,0) env(safe-area-inset-right,0) env(safe-area-inset-bottom,0) env(safe-area-inset-left,0);
+                justify-content:center;
+                align-items:center;
+            }
+            #game-container{
+                width:min(100vw, calc(100svh * .75));
+                max-width:100vw;
+                max-height:100svh;
+                border-width:2px;
+                border-radius:0;
+                box-shadow:none;
+            }
+            /* Menú: portada vertical a pantalla completa (proporción exacta 572×1024) */
+            #main-menu{
+                padding:0;
+                background:#020817;
+            }
+            #menu-art{
+                /* Llena el máximo del viewport sin deformar: botones quedan alineados */
+                width:min(100vw, calc(100svh * 572 / 1024));
+                height:min(100svh, calc(100vw * 1024 / 572));
+                max-width:100vw;
+                max-height:100svh;
+                aspect-ratio:auto;
+                border:0;
+                border-radius:0;
+                box-shadow:none;
+                background:#020817 url('assets/opt/menu_celular.webp') center/100% 100% no-repeat;
+            }
+            /* Zonas táctiles calibradas sobre la portada vertical */
+            #play-hit{
+                left:28%;
+                top:72%;
+                width:44%;
+                height:10%;
+                border-radius:18px;
+            }
+            #rank-hit{
+                left:16%;
+                top:84%;
+                width:32%;
+                height:8.5%;
+                border-radius:14px;
+            }
+            #settings-hit{
+                left:50%;
+                top:84%;
+                width:34%;
+                height:8.5%;
+                border-radius:14px;
+            }
+            #estado-red{
+                top:2.5%;
+                font-size:clamp(14px,3.8vw,20px);
+            }
+        }
+        /* Pantallas muy bajas (landscape móvil) */
+        @media (max-height:520px){
+            body{padding:0}
+            h1,#info{display:none}
+            #game-container{
+                width:min(calc(100svh * .75), 100vw);
+                max-height:100svh;
+                border-width:2px;
+            }
+        }
+        /* Landscape táctil: portada contenida y zonas un poco más altas */
+        @media (pointer:coarse) and (orientation:landscape) and (max-height:520px){
+            #menu-art{
+                width:min(100vw, calc(100svh * 572 / 1024));
+                height:min(100svh, calc(100vw * 1024 / 572));
+                background:#020817 url('assets/opt/menu_celular.webp') center/100% 100% no-repeat;
+            }
+            #play-hit{left:28%;top:71%;width:44%;height:12%}
+            #rank-hit{left:14%;top:83%;width:34%;height:11%}
+            #settings-hit{left:50%;top:83%;width:34%;height:11%}
+        }
+        /* Tablets táctiles grandes: un poco de aire en el partido */
+        @media (pointer:coarse) and (min-width:600px) and (min-height:700px){
+            #game-container{
+                width:min(min(100vw - 16px, 720px), calc((100svh - 16px) * .75));
+                border-radius:8px;
+                border-width:3px;
+                box-shadow:0 0 28px #ffcc0033;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>LIGA CHAQUITO F8</h1>
+    <div id="game-container">
+        <canvas id="gameCanvas" width="480" height="640"></canvas>
+        <div id="touch-controls" class="touch-controls" aria-label="Controles táctiles">
+            <div class="touch-joystick" id="touch-joystick" aria-label="Joystick de movimiento">
+                <div class="joy-base"></div>
+                <div class="joy-knob" id="joy-knob"></div>
+                <div class="joy-hint">DESLIZÁ</div>
+            </div>
+            <div class="touch-actions">
+                <button id="pause-touch" type="button">PAUSA</button><button data-key="ShiftLeft">SPRINT</button><button data-key="Space">TIRO</button><button data-key="KeyE">PASE</button><button data-key="KeyQ">CAMBIAR</button>
+            </div>
+        </div>
+        <div id="loading-screen">
+            <div style="font-size: 1.1rem; color: #ffcc00;">CARGANDO ASSETS...</div>
+            <div id="loading-bar-container">
+                <div id="loading-bar"></div>
+            </div>
+            <div id="loading-text">Inicializando preloader...</div>
+        </div>
+    </div>
+    <section id="main-menu" aria-label="Menú principal">
+        <div id="menu-art">
+            <button class="menu-hit" id="rank-hit" aria-label="Rangos de jugadores" title="Rangos de jugadores"></button>
+            <button class="menu-hit" id="play-hit" aria-label="Jugar" title="Jugar"></button>
+            <button class="menu-hit" id="settings-hit" aria-label="Configuración" title="Configuración"></button>
+            <p id="estado-red" aria-live="polite"></p>
+            <div id="menu-dialog"><div class="dialog-card" id="dialog-content"></div></div>
+        </div>
+    </section>
+    <section id="mode-menu" hidden aria-label="Elegir modo de juego">
+        <div id="mode-menu-art">
+            <button type="button" class="mode-hit" id="mode-solo-hit" aria-label="Jugar solo contra la inteligencia artificial" title="Jugar solo"></button>
+            <button type="button" class="mode-hit" id="mode-online-hit" aria-label="Jugar en línea" title="Jugar en línea"></button>
+            <button type="button" class="mode-hit" id="mode-league-hit" aria-label="Liga offline" title="Liga offline"></button>
+            <button type="button" class="mode-hit" id="mode-back-hit" aria-label="Volver al menú anterior" title="Volver"></button>
+        </div>
+    </section>
+    <section id="team-select" hidden aria-label="Selección de equipo">
+        <div class="ts-wrap">
+            <h2 id="ts-title">ELEGÍ TU EQUIPO</h2>
+            <p id="ts-sub"></p>
+            <div id="ts-grid"></div>
+            <div class="ts-actions">
+                <button type="button" id="ts-random" class="action-btn secondary">EQUIPO AL AZAR</button>
+                <button type="button" id="ts-back" class="action-btn">VOLVER AL MENÚ</button>
+            </div>
+        </div>
+    </section>
+    <section id="espera-rival" hidden aria-label="Buscando rival">
+        <div class="espera-card">
+            <div id="espera-escudo" class="espera-escudo"></div>
+            <h2>BUSCANDO RIVAL</h2>
+            <p id="espera-sub">Buscando rival...</p>
+            <div class="espera-pista" aria-hidden="true"><span></span></div>
+            <button type="button" id="espera-cancel" class="action-btn secondary">CANCELAR</button>
+        </div>
+    </section>
+    <section id="liga-screen" hidden aria-label="Liga offline"></section>
+    <div id="info">WASD / flechas · SHIFT sprint · ESPACIO tiro · E pase · R centro · Q cambiar jugador</div>
+    <script src="assets/sprites/atlas.js"></script>
+    <script src="assets/equipos.js"></script>
+    <script src="assets/movilidad.js"></script>
+    <script src="assets/animaciones.js"></script>
+    <script src="assets/hinchada/fans_atlas.js"></script>
+    <script src="assets/hinchada/fans.js"></script>
+    <script src="fx.js"></script>
+    <script src="liga.js"></script>
+    <script src="settings.js"></script>
+    <script src="ranking.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>
